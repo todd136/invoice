@@ -1,0 +1,5 @@
+# PDF 解析库 - 用于解析发票 PDF 文件
+pdfplumber==0.11.8
+
+# Excel 操作库 - 用于导出发票数据到 Excel
+openpyxl==3.1.2
