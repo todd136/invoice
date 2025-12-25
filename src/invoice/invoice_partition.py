@@ -7,6 +7,9 @@ import math
 import re
 from typing import List, Optional, Tuple
 
+# 获取模块级别的日志记录器
+logger = logging.getLogger(__name__)
+
 
 def group_words_by_y(words: List[dict], y_tolerance: float = 3.0) -> dict:
     """
@@ -65,7 +68,7 @@ def _find_header_keyword_y_range(words: List[dict]) -> Tuple[Optional[float], Op
             header_y_coords.append(word['top'])
     
     if not header_y_coords:
-        logging.debug('未找到发票头关键词，无法识别发票头底部分割线')
+        logger.debug('未找到发票头关键词，无法识别发票头底部分割线')
         return None, None
     
     header_y_min = min(header_y_coords)  # 最下方的关键词（top值最小，最靠上）
@@ -155,13 +158,13 @@ def find_header_bottom_line(lines: List[dict], words: List[dict], page_width: fl
     # 尝试找到"购 销"这一行作为发票头底部的参考
     buyer_seller_start_y = _find_buyer_seller_start_y(words)
     
-    logging.debug(f'发票头关键词Y坐标范围: min={header_y_min:.2f}, max={header_y_max:.2f}')
+    logger.debug(f'发票头关键词Y坐标范围: min={header_y_min:.2f}, max={header_y_max:.2f}')
     if buyer_seller_start_y:
-        logging.debug(f'购销方起始Y坐标: {buyer_seller_start_y:.2f} (购/销关键词)')
-    logging.debug(f'搜索发票头底部分割线的Y范围: {header_y_max + 5:.2f} < y0 < {header_y_max + 80:.2f}')
+        logger.debug(f'购销方起始Y坐标: {buyer_seller_start_y:.2f} (购/销关键词)')
+    logger.debug(f'搜索发票头底部分割线的Y范围: {header_y_max + 5:.2f} < y0 < {header_y_max + 80:.2f}')
     if buyer_seller_start_y:
-        logging.debug(f'基于购销方起始位置，搜索范围: {header_y_max + 5:.2f} < y0 < {buyer_seller_start_y + 30:.2f}')
-    logging.debug(f'要求线宽 > {page_width * 0.7:.2f} (页面宽度的70%)')
+        logger.debug(f'基于购销方起始位置，搜索范围: {header_y_max + 5:.2f} < y0 < {buyer_seller_start_y + 30:.2f}')
+    logger.debug(f'要求线宽 > {page_width * 0.7:.2f} (页面宽度的70%)')
     
     # 确定搜索范围（扩大容差，以便识别更多分割线）
     search_y_min = header_y_max + 5
@@ -175,32 +178,32 @@ def find_header_bottom_line(lines: List[dict], words: List[dict], page_width: fl
     
     # 如果严格条件找不到，放宽线宽要求（>50%）
     if not candidates:
-        logging.debug('放宽线宽要求，尝试查找宽度>50%的水平线')
+        logger.debug('放宽线宽要求，尝试查找宽度>50%的水平线')
         candidates, _ = _search_horizontal_line_candidates(
             lines, search_y_min, search_y_max, page_width, min_width_ratio=0.5
         )
     
     # 打印所有水平线的信息
     if horizontal_lines:
-        logging.debug(f'找到 {len(horizontal_lines)} 条水平线:')
+        logger.debug(f'找到 {len(horizontal_lines)} 条水平线:')
         for hl in horizontal_lines:
             in_range = search_y_min < hl['y0'] < search_y_max
             width_ok = hl['width'] > page_width * 0.7
             status = "✓候选" if (in_range and width_ok) else ("×范围外" if not in_range else "×宽度不足")
-            logging.debug(f'  线条 Y={hl["y0"]:.2f}, 宽度={hl["width"]:.2f}, '
+            logger.debug(f'  线条 Y={hl["y0"]:.2f}, 宽度={hl["width"]:.2f}, '
                         f'X范围=[{hl["line"]["x0"]:.2f}, {hl["line"]["x1"]:.2f}] {status}')
     
     if candidates:
         # 选择最接近关键词的线（选择y0值最接近header_y_max的）
         candidates.sort(key=lambda l: abs(l['y0'] - header_y_max))
-        logging.debug(f'找到 {len(candidates)} 条候选线，选择最接近header_y_max({header_y_max:.2f})的线')
+        logger.debug(f'找到 {len(candidates)} 条候选线，选择最接近header_y_max({header_y_max:.2f})的线')
         for i, cand in enumerate(candidates):
-            logging.debug(f'  候选{i+1}: Y={cand["y0"]:.2f}, 距离={abs(cand["y0"] - header_y_max):.2f}')
-        logging.debug(f'✓ 发票头底部分割线: Y={candidates[0]["y0"]:.2f} '
+            logger.debug(f'  候选{i+1}: Y={cand["y0"]:.2f}, 距离={abs(cand["y0"] - header_y_max):.2f}')
+        logger.debug(f'✓ 发票头底部分割线: Y={candidates[0]["y0"]:.2f} '
                     f'(距离header_y_max={abs(candidates[0]["y0"] - header_y_max):.2f})')
         return candidates[0]
     
-    logging.debug('未找到发票头底部分割线（可能没有满足条件的水平线）')
+    logger.debug('未找到发票头底部分割线（可能没有满足条件的水平线）')
     return None
 
 
@@ -307,7 +310,7 @@ def partition_three_regions_from_grouped_data(
             if table_first_y is None or y < table_first_y:  # 选择最靠上的"项目名称"行
                 table_first_y = y
     
-    logging.debug(f'关键边界行: 发票头最后一行(开票日期)Y={header_last_y}, 表格第一行(项目名称)Y={table_first_y}')
+    logger.debug(f'关键边界行: 发票头最后一行(开票日期)Y={header_last_y}, 表格第一行(项目名称)Y={table_first_y}')
     
     # 按Y坐标排序（从上到下）
     sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
@@ -319,13 +322,13 @@ def partition_three_regions_from_grouped_data(
         # 优先级1：使用关键边界行判断（最高优先级）
         # "开票日期"行及之前的所有行，归入发票头
         if header_last_y and y <= header_last_y:
-            logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 发票头（优先级1：在开票日期行及之前）')
+            logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 发票头（优先级1：在开票日期行及之前）')
             header_words.extend(line_words)
             continue
         
         # "项目名称"行及之后的所有行，归入表格
         if table_first_y and y >= table_first_y:
-            logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 表格（优先级1：在项目名称行及之后）')
+            logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 表格（优先级1：在项目名称行及之后）')
             table_words.extend(line_words)
             continue
         
@@ -337,7 +340,7 @@ def partition_three_regions_from_grouped_data(
         
         # 2.1 优先检查购销方关键词（在关键边界行之间）
         if any(kw in line_text for kw in buyer_seller_keywords):
-            logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 购销方（优先级2：包含购销方关键词）')
+            logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 购销方（优先级2：包含购销方关键词）')
             buyer_seller_words.extend(line_words)
             continue
         
@@ -345,7 +348,7 @@ def partition_three_regions_from_grouped_data(
         if any(kw in line_text for kw in table_keywords):
             # 如果包含表格关键词，且不在"项目名称"行之前，归入表格
             if not (table_first_y and y < table_first_y):
-                logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 表格（优先级2：包含表格关键词）')
+                logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 表格（优先级2：包含表格关键词）')
                 table_words.extend(line_words)
                 continue
         
@@ -361,7 +364,7 @@ def partition_three_regions_from_grouped_data(
                     pass
                 else:
                     # 包含明确的发票头关键词，归入发票头
-                    logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 发票头（优先级2：包含发票头关键词）')
+                    logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 发票头（优先级2：包含发票头关键词）')
                     header_words.extend(line_words)
                     continue
         
@@ -370,16 +373,16 @@ def partition_three_regions_from_grouped_data(
         if header_last_y and table_first_y:
             # 在"开票日期"行和"项目名称"行之间的行，归入购销方
             if header_last_y < y < table_first_y:
-                logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 购销方（优先级3：在开票日期行和项目名称行之间）')
+                logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 购销方（优先级3：在开票日期行和项目名称行之间）')
                 buyer_seller_words.extend(line_words)
             elif y <= header_last_y:
-                logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 发票头（优先级3：Y坐标判断）')
+                logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 发票头（优先级3：Y坐标判断）')
                 header_words.extend(line_words)
             elif y >= table_first_y:
-                logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 表格（优先级3：Y坐标判断）')
+                logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 表格（优先级3：Y坐标判断）')
                 table_words.extend(line_words)
             else:
-                logging.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 购销方（优先级3：默认）')
+                logger.debug(f'行Y={y:.2f} "{line_text[:50]}" -> 购销方（优先级3：默认）')
                 buyer_seller_words.extend(line_words)
         elif header_bottom_y and y < header_bottom_y - BOUNDARY_TOLERANCE:
             header_words.extend(line_words)
@@ -396,7 +399,7 @@ def partition_three_regions_from_grouped_data(
             # 默认归入购销方
             buyer_seller_words.extend(line_words)
     
-    logging.debug(f'3个大块分区结果（基于分组数据）: 发票头={len(header_words)}个单词, '
+    logger.debug(f'3个大块分区结果（基于分组数据）: 发票头={len(header_words)}个单词, '
                  f'购销方={len(buyer_seller_words)}个单词, 表格={len(table_words)}个单词')
     
     return header_words, buyer_seller_words, table_words
@@ -439,10 +442,10 @@ def find_table_bottom_boundary(words: List[dict]) -> Optional[float]:
     if bottom_y_coords:
         # 返回最小的Y坐标（最靠上的底部关键词）
         table_bottom = min(bottom_y_coords)
-        # logging.debug(f'识别到表格底部边界: Y={table_bottom:.2f} (基于关键词: {bottom_keywords})')
+        # logger.debug(f'识别到表格底部边界: Y={table_bottom:.2f} (基于关键词: {bottom_keywords})')
         return table_bottom
     
-    logging.debug('未找到表格底部关键词，不设置底部边界')
+    logger.debug('未找到表格底部关键词，不设置底部边界')
     return None
 
 
@@ -469,12 +472,12 @@ def find_table_top_line(lines: List[dict], words: List[dict], page_width: float)
                 table_header_y = word['top']
     
     if not table_header_y:
-        logging.debug('未找到表格表头关键词，无法识别表格顶部分割线')
+        logger.debug('未找到表格表头关键词，无法识别表格顶部分割线')
         return None
     
-    logging.debug(f'表格表头关键词Y坐标: {table_header_y:.2f}')
-    logging.debug(f'搜索表格顶部分割线的Y范围: {table_header_y - 50:.2f} < y0 < {table_header_y - 5:.2f}')
-    logging.debug(f'要求线宽 > {page_width * 0.7:.2f} (页面宽度的70%)')
+    logger.debug(f'表格表头关键词Y坐标: {table_header_y:.2f}')
+    logger.debug(f'搜索表格顶部分割线的Y范围: {table_header_y - 50:.2f} < y0 < {table_header_y - 5:.2f}')
+    logger.debug(f'要求线宽 > {page_width * 0.7:.2f} (页面宽度的70%)')
     
     # 查找在表头上方、横跨页面的水平线
     # 在pdfplumber中，top值越大越靠下，所以分割线应该在表头上方（y0值应该更小）
@@ -490,14 +493,14 @@ def find_table_top_line(lines: List[dict], words: List[dict], page_width: float)
     
     if candidates:
         candidates.sort(key=lambda l: abs(l['y0'] - table_header_y))
-        logging.debug(f'找到 {len(candidates)} 条候选线，选择最接近table_header_y({table_header_y:.2f})的线')
+        logger.debug(f'找到 {len(candidates)} 条候选线，选择最接近table_header_y({table_header_y:.2f})的线')
         for i, cand in enumerate(candidates):
-            logging.debug(f'  候选{i+1}: Y={cand["y0"]:.2f}, 距离={abs(cand["y0"] - table_header_y):.2f}')
-        logging.debug(f'✓ 表格顶部分割线: Y={candidates[0]["y0"]:.2f} '
+            logger.debug(f'  候选{i+1}: Y={cand["y0"]:.2f}, 距离={abs(cand["y0"] - table_header_y):.2f}')
+        logger.debug(f'✓ 表格顶部分割线: Y={candidates[0]["y0"]:.2f} '
                     f'(距离table_header_y={abs(candidates[0]["y0"] - table_header_y):.2f})')
         return candidates[0]
     
-    logging.debug('未找到表格顶部分割线（可能没有满足条件的水平线）')
+    logger.debug('未找到表格顶部分割线（可能没有满足条件的水平线）')
     return None
 
 
@@ -539,10 +542,10 @@ def _determine_y_range_by_keywords(
     
     if buyer_seller_y_coords and table_y_coords:
         y_range = (min(buyer_seller_y_coords), max(table_y_coords))
-        logging.debug(f'使用关键词确定的Y范围: [{y_range[0]:.2f}, {y_range[1]:.2f}]')
+        logger.debug(f'使用关键词确定的Y范围: [{y_range[0]:.2f}, {y_range[1]:.2f}]')
         return y_range
     
-    logging.debug('无法使用关键词确定Y范围，跳过购买方/销售方分界线识别')
+    logger.debug('无法使用关键词确定Y范围，跳过购买方/销售方分界线识别')
     return None
 
 
@@ -568,9 +571,9 @@ def find_buyer_seller_divider(
     """
     # 确定Y范围
     if not header_bottom_line:
-        logging.debug('未找到发票头底部分割线，尝试使用关键词确定购买方/销售方区域')
+        logger.debug('未找到发票头底部分割线，尝试使用关键词确定购买方/销售方区域')
     if not table_top_line:
-        logging.debug('未找到表格顶部分割线，尝试使用关键词确定购买方/销售方区域')
+        logger.debug('未找到表格顶部分割线，尝试使用关键词确定购买方/销售方区域')
     
     y_range = _determine_y_range_by_keywords(words, header_bottom_line, table_top_line)
     if y_range is None:
@@ -578,8 +581,8 @@ def find_buyer_seller_divider(
     
     mid_x = page_width / 2
     
-    logging.debug(f'购买方/销售方区域Y范围: [{y_range[0]:.2f}, {y_range[1]:.2f}]')
-    logging.debug(f'搜索购买方/销售方分界线的X范围: {mid_x - page_width * 0.15:.2f} < x0 < {mid_x + page_width * 0.15:.2f} (页面中点±15%)')
+    logger.debug(f'购买方/销售方区域Y范围: [{y_range[0]:.2f}, {y_range[1]:.2f}]')
+    logger.debug(f'搜索购买方/销售方分界线的X范围: {mid_x - page_width * 0.15:.2f} < x0 < {mid_x + page_width * 0.15:.2f} (页面中点±15%)')
     
     candidates = []
     vertical_lines = []
@@ -603,18 +606,18 @@ def find_buyer_seller_divider(
     
     # 打印所有垂直线的信息
     if vertical_lines:
-        logging.debug(f'找到 {len(vertical_lines)} 条垂直线:')
+        logger.debug(f'找到 {len(vertical_lines)} 条垂直线:')
         for vl in vertical_lines:
-            logging.debug(f'  X={vl["x0"]:.2f}, Y范围=[{vl["y_range"][0]:.2f}, {vl["y_range"][1]:.2f}], '
+            logger.debug(f'  X={vl["x0"]:.2f}, Y范围=[{vl["y_range"][0]:.2f}, {vl["y_range"][1]:.2f}], '
                          f'距离中点={abs(vl["x0"] - mid_x):.2f}')
     
     if candidates:
         # 选择最接近页面中点的线
         candidates.sort(key=lambda l: abs(l['x0'] - mid_x))
-        logging.debug(f'找到购买方/销售方分界线，X坐标: {candidates[0]["x0"]:.2f}')
+        logger.debug(f'找到购买方/销售方分界线，X坐标: {candidates[0]["x0"]:.2f}')
         return candidates[0]
     
-    logging.debug('未找到购买方/销售方分界线')
+    logger.debug('未找到购买方/销售方分界线')
     return None
 
 
@@ -663,7 +666,7 @@ def filter_relevant_lines(lines: List[dict], page_width: float, words: Optional[
                 line_y = line['y0']
                 # 如果线条在底部边界下方（Y值更大），排除
                 if line_y >= table_bottom_boundary - 10:  # 10像素容差
-                    logging.debug(f'排除底部线条: Y={line_y:.2f} (表格底部边界={table_bottom_boundary:.2f})')
+                    logger.debug(f'排除底部线条: Y={line_y:.2f} (表格底部边界={table_bottom_boundary:.2f})')
                     continue
         
         relevant_lines.append(line)
@@ -697,7 +700,7 @@ def _find_table_bottom_line(
         search_y_min = table_bottom_keyword_y - 150
         search_y_max = table_bottom_keyword_y + 50
         
-        logging.debug(f'搜索表格底部水平线: 关键词Y={table_bottom_keyword_y:.2f}, 搜索范围=[{search_y_min:.2f}, {search_y_max:.2f}]')
+        logger.debug(f'搜索表格底部水平线: 关键词Y={table_bottom_keyword_y:.2f}, 搜索范围=[{search_y_min:.2f}, {search_y_max:.2f}]')
         
         for line in lines:
             # 水平线（y0和y1接近）
@@ -709,12 +712,12 @@ def _find_table_bottom_line(
                     if (search_y_min < line['y0'] < search_y_max and
                         (not table_top_y or line['y0'] > table_top_y)):
                         candidates.append(line)
-                        logging.debug(f'找到候选水平线: Y={line["y0"]:.2f}, 宽度={line_width:.2f}')
+                        logger.debug(f'找到候选水平线: Y={line["y0"]:.2f}, 宽度={line_width:.2f}')
     
     # 方法2：如果没有关键词或没找到，查找表格顶部下方、横跨页面的水平线
     # 找到所有在表格顶部下方的水平线，选择最靠下的（但要在关键词下方，如果有关键词）
     if not candidates and table_top_y:
-        logging.debug(f'方法1未找到，使用方法2: 表格顶部Y={table_top_y:.2f}')
+        logger.debug(f'方法1未找到，使用方法2: 表格顶部Y={table_top_y:.2f}')
         for line in lines:
             if abs(line['y0'] - line['y1']) < 2.0:  # 水平线
                 line_width = abs(line['x1'] - line['x0'])
@@ -724,7 +727,7 @@ def _find_table_bottom_line(
                         # 如果有关键词，水平线应该在关键词下方（或附近，扩大范围到150像素）
                         if not table_bottom_keyword_y or line['y0'] < table_bottom_keyword_y + 150:
                             candidates.append(line)
-                            logging.debug(f'找到候选水平线: Y={line["y0"]:.2f}, 宽度={line_width:.2f}')
+                            logger.debug(f'找到候选水平线: Y={line["y0"]:.2f}, 宽度={line_width:.2f}')
     
     if candidates:
         # 如果有关键词，优先选择关键词上方最近的水平线（用于分隔表格内容和底部内容）
@@ -736,25 +739,25 @@ def _find_table_bottom_line(
                 # 选择关键词上方最近的水平线（y0值最大的，即最靠下的）
                 above_keyword_lines.sort(key=lambda l: l['y0'], reverse=True)
                 table_bottom_line_y = above_keyword_lines[0]['y0']
-                logging.debug(f'识别到表格底部水平线: Y={table_bottom_line_y:.2f} '
+                logger.debug(f'识别到表格底部水平线: Y={table_bottom_line_y:.2f} '
                             f'(在关键词Y={table_bottom_keyword_y:.2f}上方，用于分隔表格内容和底部内容)')
                 return table_bottom_line_y
             else:
                 # 如果没有关键词上方的线，选择最靠下的线
                 candidates.sort(key=lambda l: l['y0'], reverse=True)
                 table_bottom_line_y = candidates[0]['y0']
-                logging.debug(f'识别到表格底部水平线: Y={table_bottom_line_y:.2f} '
+                logger.debug(f'识别到表格底部水平线: Y={table_bottom_line_y:.2f} '
                             f'(所有候选线都在关键词下方，选择最靠下的)')
                 return table_bottom_line_y
         else:
             # 没有关键词，选择最靠下的线
             candidates.sort(key=lambda l: l['y0'], reverse=True)
             table_bottom_line_y = candidates[0]['y0']
-            logging.debug(f'识别到表格底部水平线: Y={table_bottom_line_y:.2f} '
+            logger.debug(f'识别到表格底部水平线: Y={table_bottom_line_y:.2f} '
                         f'(无关键词，选择最靠下的线)')
             return table_bottom_line_y
     
-    logging.debug('未找到表格底部水平线')
+    logger.debug('未找到表格底部水平线')
     return None
 
 
@@ -792,7 +795,7 @@ def identify_region_boundaries(
     # 查找表格开始行（"项目名称"行）
     table_top_keyword_y = find_keyword_line(lines_dict, table_keywords)
     
-    logging.debug(f'基于行分组识别的边界: 购销方开始行Y={header_bottom_keyword_y}, 表格开始行Y={table_top_keyword_y}')
+    logger.debug(f'基于行分组识别的边界: 购销方开始行Y={header_bottom_keyword_y}, 表格开始行Y={table_top_keyword_y}')
     
     # 3. 识别水平线
     header_bottom_line = find_header_bottom_line(lines, words, page_width)
@@ -802,24 +805,24 @@ def identify_region_boundaries(
     header_bottom_y = None
     if header_bottom_line:
         header_bottom_y = header_bottom_line['y0']
-        logging.debug(f'使用水平线识别发票头底部边界: Y={header_bottom_y:.2f}')
+        logger.debug(f'使用水平线识别发票头底部边界: Y={header_bottom_y:.2f}')
     elif header_bottom_keyword_y:
         header_bottom_y = header_bottom_keyword_y
-        logging.debug(f'使用关键词行识别发票头底部边界: Y={header_bottom_y:.2f}')
+        logger.debug(f'使用关键词行识别发票头底部边界: Y={header_bottom_y:.2f}')
     
     table_top_y = None
     if table_top_line:
         table_top_y = table_top_line['y0']
-        logging.debug(f'使用水平线识别表格顶部边界: Y={table_top_y:.2f}')
+        logger.debug(f'使用水平线识别表格顶部边界: Y={table_top_y:.2f}')
     elif table_top_keyword_y:
         table_top_y = table_top_keyword_y
-        logging.debug(f'使用关键词行识别表格顶部边界: Y={table_top_y:.2f}')
+        logger.debug(f'使用关键词行识别表格顶部边界: Y={table_top_y:.2f}')
     
     # 5. 验证边界合理性
     if header_bottom_y and table_top_y:
         if header_bottom_y >= table_top_y:
             # 边界不合理，使用关键词行
-            logging.warning(f'边界不合理（header_bottom_y={header_bottom_y:.2f} >= table_top_y={table_top_y:.2f}），使用关键词行')
+            logger.warning(f'边界不合理（header_bottom_y={header_bottom_y:.2f} >= table_top_y={table_top_y:.2f}），使用关键词行')
             if header_bottom_keyword_y:
                 header_bottom_y = header_bottom_keyword_y
             if table_top_keyword_y:
@@ -833,7 +836,7 @@ def identify_region_boundaries(
     lines_for_bottom = all_lines if all_lines is not None else lines
     table_bottom_line_y = _find_table_bottom_line(lines_for_bottom, table_bottom_y, table_top_y, page_width)
     
-    logging.debug(f'最终确定的3个大块边界: 发票头底部Y={header_bottom_y}, '
+    logger.debug(f'最终确定的3个大块边界: 发票头底部Y={header_bottom_y}, '
                  f'表格顶部Y={table_top_y}, 表格底部关键词Y={table_bottom_y}, '
                  f'表格底部水平线Y={table_bottom_line_y}')
     
@@ -978,7 +981,7 @@ def split_buyer_seller(
                 else:
                     seller_words.append(word)
     
-    logging.debug(f'购销方拆分结果: 购买方={len(buyer_words)}个单词, 销售方={len(seller_words)}个单词')
+    logger.debug(f'购销方拆分结果: 购买方={len(buyer_words)}个单词, 销售方={len(seller_words)}个单词')
     
     return buyer_words, seller_words
 
@@ -992,11 +995,11 @@ def _log_all_lines_info(all_lines: List[dict], page_width: float, table_bottom_b
         page_width: 页面宽度
         table_bottom_boundary: 表格底部边界Y坐标
     """
-    logging.debug("\n" + "="*80)
-    logging.debug("线条坐标信息（所有线条）")
-    logging.debug("="*80)
-    logging.debug(f"{'序号':<6} {'类型':<10} {'X0':<10} {'X1':<10} {'Y0':<10} {'Y1':<10} {'宽度':<10} {'高度':<10} {'长度':<10} {'过滤原因':<15}")
-    logging.debug("-" * 120)
+    logger.debug("\n" + "="*80)
+    logger.debug("线条坐标信息（所有线条）")
+    logger.debug("="*80)
+    logger.debug(f"{'序号':<6} {'类型':<10} {'X0':<10} {'X1':<10} {'Y0':<10} {'Y1':<10} {'宽度':<10} {'高度':<10} {'长度':<10} {'过滤原因':<15}")
+    logger.debug("-" * 120)
     
     for i, line in enumerate(all_lines):
         line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
@@ -1027,9 +1030,9 @@ def _log_all_lines_info(all_lines: List[dict], page_width: float, table_bottom_b
             if line_length < page_width * 0.3:
                 filter_reason = "太短"
         
-        logging.debug(f"{i+1:<6} {line_type:<10} {x0:<10.2f} {x1:<10.2f} {y0:<10.2f} {y1:<10.2f} {width:<10.2f} {height:<10.2f} {length:<10.2f} {filter_reason:<15}")
+        logger.debug(f"{i+1:<6} {line_type:<10} {x0:<10.2f} {x1:<10.2f} {y0:<10.2f} {y1:<10.2f} {width:<10.2f} {height:<10.2f} {length:<10.2f} {filter_reason:<15}")
     
-    logging.debug("="*80 + "\n")
+    logger.debug("="*80 + "\n")
 
 
 def _log_filtered_lines(lines: List[dict]):
@@ -1040,10 +1043,10 @@ def _log_filtered_lines(lines: List[dict]):
         lines: 过滤后的线条列表
     """
     if lines:
-        logging.debug("\n过滤后的线条坐标信息:")
+        logger.debug("\n过滤后的线条坐标信息:")
         for i, line in enumerate(lines):
             line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
-            logging.debug(f"  线条{i+1} ({line_type}): X=[{line['x0']:.2f}, {line['x1']:.2f}], Y=[{line['y0']:.2f}, {line['y1']:.2f}], "
+            logger.debug(f"  线条{i+1} ({line_type}): X=[{line['x0']:.2f}, {line['x1']:.2f}], Y=[{line['y0']:.2f}, {line['y1']:.2f}], "
                         f"宽度={abs(line['x1']-line['x0']):.2f}, 高度={abs(line['y1']-line['y0']):.2f}")
 
 
@@ -1056,20 +1059,20 @@ def _log_word_lines_grouping(lines_dict: dict):
     """
     sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0], reverse=False)
     
-    logging.debug("\n单词按行分组（用于分析区域边界）")
-    logging.debug("="*80)
-    logging.debug(f"{'行号':<6} {'Y坐标':<12} {'单词数':<8} {'文字内容'}")
-    logging.debug("-" * 100)
+    logger.debug("\n单词按行分组（用于分析区域边界）")
+    logger.debug("="*80)
+    logger.debug(f"{'行号':<6} {'Y坐标':<12} {'单词数':<8} {'文字内容'}")
+    logger.debug("-" * 100)
     
     for line_num, (y_coord, line_words) in enumerate(sorted_lines, 1):
         sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
         line_text = ' '.join([w['text'] for w in sorted_line_words])
         if len(line_text) > 80:
             line_text = line_text[:77] + "..."
-        logging.debug(f"{line_num:<6} {y_coord:<12.2f} {len(line_words):<8} {line_text}")
+        logger.debug(f"{line_num:<6} {y_coord:<12.2f} {len(line_words):<8} {line_text}")
     
-    logging.debug("="*80)
-    logging.debug(f"总共 {len(sorted_lines)} 行\n")
+    logger.debug("="*80)
+    logger.debug(f"总共 {len(sorted_lines)} 行\n")
 
 
 def reconstruct_text_from_words(words: List[dict]) -> str:
@@ -1133,7 +1136,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     
     # 提取所有线条
     all_lines = page.lines
-    logging.debug(f'页面中共有 {len(all_lines)} 条线条')
+    logger.debug(f'页面中共有 {len(all_lines)} 条线条')
     
     # 识别表格底部边界（用于分析过滤原因）
     table_bottom_boundary = None
@@ -1145,15 +1148,15 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     
     # 过滤无关线条（排除底部线条）
     lines = filter_relevant_lines(all_lines, page_width, words)
-    logging.debug(f'过滤后剩余 {len(lines)} 条相关线条（已排除底部价税合计/备注等行的分割线）')
+    logger.debug(f'过滤后剩余 {len(lines)} 条相关线条（已排除底部价税合计/备注等行的分割线）')
     
     # 打印过滤后的线条信息
     _log_filtered_lines(lines)
     
     # ========== 新逻辑：分层分区 ==========
-    logging.debug("\n" + "="*80)
-    logging.debug("开始分层分区逻辑")
-    logging.debug("="*80)
+    logger.debug("\n" + "="*80)
+    logger.debug("开始分层分区逻辑")
+    logger.debug("="*80)
     
     # 步骤1：识别3个大块的边界（结合水平线和行分组）
     # 传递所有线条，用于查找表格底部水平线
@@ -1169,7 +1172,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     filtered_lines_dict = filter_bottom_lines_from_grouped_data(
         lines_dict, table_bottom_y, table_bottom_line_y
     )
-    logging.debug(f'删除底部内容后，剩余 {len(filtered_lines_dict)} 行数据')
+    logger.debug(f'删除底部内容后，剩余 {len(filtered_lines_dict)} 行数据')
     
     # 步骤4：基于分组数据+水平线，划分3大块（按行分配）
     header_words, buyer_seller_words, table_words = partition_three_regions_from_grouped_data(
@@ -1181,7 +1184,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
         buyer_seller_words, lines, header_bottom_y, table_top_y, page_width
     )
     
-    logging.debug(f'\n最终分区结果: 发票头={len(header_words)}个单词, '
+    logger.debug(f'\n最终分区结果: 发票头={len(header_words)}个单词, '
                  f'购买方={len(buyer_words)}个单词, '
                  f'销售方={len(seller_words)}个单词, '
                  f'表格={len(table_words)}个单词')
