@@ -37,6 +37,7 @@ def setup_log(base_path: str) -> None:
     )
 
     logging.info(f'日志文件路径: {log_file_path}')
+    logging.getLogger('invoice').setLevel(logging.DEBUG)
 
 
 def main():
