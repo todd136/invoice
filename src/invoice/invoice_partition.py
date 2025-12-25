@@ -671,115 +671,6 @@ def filter_relevant_lines(lines: List[dict], page_width: float, words: Optional[
     return relevant_lines
 
 
-def is_header_content(word: dict) -> bool:
-    """
-    判断单词是否应该是发票头内容
-    
-    Args:
-        word: 单词字典
-    
-    Returns:
-        如果是发票头内容返回True
-    """
-    text = word['text']
-    header_keywords = ['发票号码', '开票日期', '电子发票', '普通发票', '增值税专用发票', '发票']
-    # 检查是否包含发票头关键词
-    if any(kw in text for kw in header_keywords):
-        return True
-    # 检查是否是日期格式（开票日期）
-    if re.search(r'\d{4}年\d{1,2}月\d{1,2}日', text):
-        return True
-    # 检查是否是发票号码（12-20位数字）
-    if re.match(r'^\d{12,20}$', text.replace(' ', '')):
-        return True
-    return False
-
-
-def is_bottom_content(word: dict) -> bool:
-    """
-    判断单词是否应该是发票底部内容（开票人、备注、银行信息等）
-    
-    Args:
-        word: 单词字典
-    
-    Returns:
-        如果是底部内容返回True
-    """
-    text = word['text']
-    bottom_keywords = ['价税合计', '合计', '备注', '注', '开票人', '收款人', '复核人',
-                      '购方开户银行', '销方开户银行', '银行账号', '开户银行', '账号']
-    # 检查是否包含底部关键词
-    if any(kw in text for kw in bottom_keywords):
-        return True
-    # 检查是否是"合计"（但排除表格中的金额合计）
-    if '合计' in text and '价税' not in text:
-        # 如果附近有"价税合计"，才认为是底部
-        return True
-    # 检查是否是银行账号格式（长数字串，通常是银行账号）
-    if re.match(r'^\d{15,20}$', text.replace(' ', '')):
-        # 可能是银行账号，需要结合上下文判断
-        return True
-    return False
-
-
-def is_buyer_seller_content(word: dict) -> bool:
-    """
-    判断单词是否应该是购销方内容
-    
-    Args:
-        word: 单词字典
-    
-    Returns:
-        如果是购销方内容返回True
-    """
-    text = word['text']
-    # 优先匹配完整关键词
-    buyer_seller_keywords = ['购买方', '销售方', '名称', '统一社会信用代码', 
-                            '纳税人识别号', '开户银行', '银行账号']
-    if any(kw in text for kw in buyer_seller_keywords):
-        return True
-    # 匹配单字关键词（但排除明显不是的情况）
-    single_char_keywords = ['购', '销', '买', '售']
-    # 如果文本只包含这些单字，或者是"方"等，可能是购销方标签
-    if len(text.strip()) <= 2 and any(kw in text for kw in single_char_keywords):
-        return True
-    # 检查是否是公司名称（包含"公司"、"企业"、"有限"等）
-    if re.search(r'(公司|企业|有限|股份|集团|服务|信息|科技)', text):
-        return True
-    # 检查是否是税号格式（18位数字或字母数字组合）
-    # 注意：排除发票号码格式（12-20位纯数字），发票号码应该在发票头区域
-    cleaned_text = text.replace(' ', '')
-    if re.match(r'^[0-9A-Z]{15,20}$', cleaned_text):
-        # 如果是12-20位纯数字，可能是发票号码，不是税号
-        if re.match(r'^\d{12,20}$', cleaned_text):
-            return False  # 发票号码，不是税号
-        # 否则是税号（包含字母或长度不在12-20位纯数字范围内）
-        return True
-    return False
-
-
-def is_table_content(word: dict) -> bool:
-    """
-    判断单词是否应该是表格内容
-    
-    Args:
-        word: 单词字典
-    
-    Returns:
-        如果是表格内容返回True
-    """
-    text = word['text']
-    table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额',
-                     '合计', '价税合计', '*', '服务', '费']
-    # 检查是否包含表格关键词
-    if any(kw in text for kw in table_keywords):
-        return True
-    # 检查是否是项目名称模式（*项目名称*费用名称）
-    if re.search(r'\*[^*]+\*[^*]+', text):
-        return True
-    return False
-
-
 def _find_table_bottom_line(
     lines: List[dict],
     table_bottom_keyword_y: Optional[float],
@@ -947,284 +838,6 @@ def identify_region_boundaries(
                  f'表格底部水平线Y={table_bottom_line_y}')
     
     return header_bottom_y, table_top_y, table_bottom_y, table_bottom_line_y
-
-
-def _check_same_line_for_keywords(
-    word: dict,
-    words: List[dict],
-    keywords: List[str],
-    y_tolerance: float = 3.0
-) -> bool:
-    """
-    检查同一行是否有指定的关键词
-    
-    Args:
-        word: 当前单词
-        words: 所有单词列表
-        keywords: 关键词列表
-        y_tolerance: Y坐标容差
-    
-    Returns:
-        如果同一行有指定关键词返回True
-    """
-    word_y = word['top']
-    for w in words:
-        if w == word:
-            continue
-        if abs(w['top'] - word_y) < y_tolerance:
-            if any(kw in w['text'] for kw in keywords):
-                return True
-    return False
-
-
-def _should_assign_to_header(
-    word: dict,
-    header_bottom_y: Optional[float],
-    boundary_tolerance: float,
-    all_words: Optional[List[dict]] = None
-) -> bool:
-    """
-    判断单词是否应归入发票头区域
-    
-    Args:
-        word: 单词
-        header_bottom_y: 发票头底部边界Y坐标
-        boundary_tolerance: 边界容差
-        all_words: 所有单词列表（用于检查同一行的关键词）
-    
-    Returns:
-        如果应归入发票头区域返回True
-    """
-    if not header_bottom_y:
-        return False
-    
-    word_y = word['top']
-    word_text = word['text']
-    
-    # 优先使用关键词判断：如果包含明显的购销方或表格关键词，排除
-    if is_buyer_seller_content(word) and not is_header_content(word):
-        return False
-    if is_table_content(word) and not is_header_content(word):
-        return False
-    
-    # 检查同一行是否有购销方关键词（如"名称："）
-    # 即使当前单词本身不包含关键词，但如果同一行有"名称："等关键词，也应该排除
-    if all_words:
-        buyer_seller_keywords = ['名称', '购买方', '销售方', '统一社会信用代码', '纳税人识别号']
-        if _check_same_line_for_keywords(word, all_words, buyer_seller_keywords):
-            return False
-        
-        table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额']
-        if _check_same_line_for_keywords(word, all_words, table_keywords):
-            return False
-    
-    # 在发票头底部边界上方（使用坐标判断）
-    if word_y < header_bottom_y - boundary_tolerance:
-        return True
-    
-    return False
-
-
-def _should_assign_to_table(
-    word: dict,
-    table_top_y: Optional[float],
-    table_bottom_y: Optional[float],
-    boundary_tolerance: float
-) -> bool:
-    """
-    判断单词是否应归入表格区域
-    
-    Args:
-        word: 单词
-        table_top_y: 表格顶部边界Y坐标
-        table_bottom_y: 表格底部边界Y坐标
-        boundary_tolerance: 边界容差
-    
-    Returns:
-        如果应归入表格区域返回True
-    """
-    if not table_top_y:
-        return False
-    
-    word_y = word['top']
-    # 在表格顶部边界下方
-    if word_y > table_top_y + boundary_tolerance:
-        # 排除表格底部内容
-        if table_bottom_y and word_y >= table_bottom_y - boundary_tolerance:
-            return False
-        # 如果包含明显的购销方关键词，排除
-        if is_buyer_seller_content(word) and not is_table_content(word):
-            return False
-        return True
-    
-    return False
-
-
-def _should_assign_to_buyer_seller(
-    word: dict,
-    header_bottom_y: Optional[float],
-    table_top_y: Optional[float],
-    table_bottom_y: Optional[float],
-    boundary_tolerance: float
-) -> bool:
-    """
-    判断单词是否应归入购销方区域
-    
-    Args:
-        word: 单词
-        header_bottom_y: 发票头底部边界Y坐标
-        table_top_y: 表格顶部边界Y坐标
-        table_bottom_y: 表格底部边界Y坐标
-        boundary_tolerance: 边界容差
-    
-    Returns:
-        如果应归入购销方区域返回True
-    """
-    if not header_bottom_y or not table_top_y:
-        return False
-    
-    word_y = word['top']
-    # 在两个边界之间
-    if (header_bottom_y - boundary_tolerance <= word_y <= 
-        table_top_y + boundary_tolerance):
-        # 排除底部内容
-        if table_bottom_y and word_y >= table_bottom_y - boundary_tolerance:
-            return False
-        if is_bottom_content(word):
-            return False
-        return True
-    
-    return False
-
-
-def partition_three_regions(
-    words: List[dict],
-    header_bottom_y: Optional[float],
-    table_top_y: Optional[float],
-    table_bottom_y: Optional[float],
-    table_bottom_line_y: Optional[float] = None
-) -> Tuple[List[dict], List[dict], List[dict]]:
-    """
-    将单词分配到3个大块
-    
-    Args:
-        words: 单词列表
-        header_bottom_y: 发票头底部边界Y坐标
-        table_top_y: 表格顶部边界Y坐标
-        table_bottom_y: 表格底部边界Y坐标（关键词）
-        table_bottom_line_y: 表格底部水平线Y坐标（用于过滤底部内容）
-    
-    Returns:
-        (header_words, buyer_seller_words, table_words)
-    """
-    header_words = []
-    buyer_seller_words = []
-    table_words = []
-    
-    BOUNDARY_TOLERANCE = 5.0  # 边界容差
-    
-    for word in words:
-        word_y = word['top']
-        word_text = word['text']
-        
-        # ========== 第一步：过滤底部内容（优先执行，确保所有底部内容都被过滤） ==========
-        # 策略：结合Y坐标和关键词判断，确保所有底部内容都被过滤
-        
-        # 1. 优先检查是否是底部内容（使用关键词判断）
-        if is_bottom_content(word):
-            # 如果是底部内容，直接跳过，不归入任何区域
-            logging.debug(f'单词"{word_text}" (Y={word_y:.2f}) 是底部内容，跳过')
-            continue  # 不归入任何区域
-        
-        # 2. 使用Y坐标过滤（作为补充）
-        # 如果表格底部水平线存在，且水平线在关键词上方（用于分隔表格内容和底部内容）
-        #    则使用水平线过滤：Y坐标大于水平线的单词，直接跳过
-        if table_bottom_line_y and table_bottom_y:
-            if table_bottom_line_y < table_bottom_y:
-                # 水平线在关键词上方，使用水平线过滤
-                if word_y > table_bottom_line_y:
-                    logging.debug(f'单词"{word_text}" (Y={word_y:.2f}) 在表格底部水平线(Y={table_bottom_line_y:.2f})下方，跳过')
-                    continue  # 不归入任何区域
-            else:
-                # 水平线在关键词下方或太靠下，使用关键词过滤
-                if word_y >= table_bottom_y - BOUNDARY_TOLERANCE:
-                    logging.debug(f'单词"{word_text}" (Y={word_y:.2f}) 在表格底部关键词(Y={table_bottom_y:.2f})下方，跳过（水平线Y={table_bottom_line_y:.2f}太靠下）')
-                    continue  # 不归入任何区域
-        elif table_bottom_line_y:
-            # 只有水平线，没有关键词，使用水平线过滤
-            if word_y > table_bottom_line_y:
-                logging.debug(f'单词"{word_text}" (Y={word_y:.2f}) 在表格底部水平线(Y={table_bottom_line_y:.2f})下方，跳过')
-                continue  # 不归入任何区域
-        elif table_bottom_y:
-            # 只有关键词，使用关键词过滤
-            # 策略：如果单词Y坐标大于等于表格底部关键词-容差，直接跳过（不归入任何区域）
-            # 这样可以过滤掉"价税合计"、"备注"、"开票人"、"业务单号"等所有底部内容
-            if word_y >= table_bottom_y - BOUNDARY_TOLERANCE:
-                logging.debug(f'单词"{word_text}" (Y={word_y:.2f}) 在表格底部关键词(Y={table_bottom_y:.2f})下方，跳过')
-                continue  # 不归入任何区域
-        
-        # ========== 第二步：区域分配（优先使用关键词判断，关键词优先于坐标） ==========
-        
-        # 定义关键词列表
-        buyer_seller_keywords = ['名称', '购买方', '销售方', '统一社会信用代码', '纳税人识别号', '开户银行', '银行账号']
-        table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额', '合计', '价税合计']
-        header_keywords = ['发票号码', '开票日期', '电子发票', '普通发票', '增值税专用发票', '发票']
-        
-        # 优先级1：检查同一行是否有关键词（最高优先级）
-        # 即使单词本身不包含关键词，如果同一行有关键词，也应该归入对应区域
-        # 注意：检查顺序很重要，应该先检查发票头（因为发票号码可能被误判为税号）
-        if _check_same_line_for_keywords(word, words, header_keywords):
-            header_words.append(word)
-            continue
-        
-        if _check_same_line_for_keywords(word, words, buyer_seller_keywords):
-            buyer_seller_words.append(word)
-            continue
-        
-        if _check_same_line_for_keywords(word, words, table_keywords):
-            table_words.append(word)
-            continue
-        
-        # 优先级2：检查单词本身是否包含关键词
-        if is_buyer_seller_content(word):
-            buyer_seller_words.append(word)
-            continue
-        
-        if is_table_content(word):
-            table_words.append(word)
-            continue
-        
-        if is_header_content(word):
-            header_words.append(word)
-            continue
-        
-        # 优先级3：使用坐标判断（关键词判断失败时）
-        # 按优先级判断应归入哪个区域（使用坐标）
-        if _should_assign_to_header(word, header_bottom_y, BOUNDARY_TOLERANCE, words):
-            header_words.append(word)
-            continue
-        
-        if _should_assign_to_table(word, table_top_y, table_bottom_y, BOUNDARY_TOLERANCE):
-            table_words.append(word)
-            continue
-        
-        if _should_assign_to_buyer_seller(word, header_bottom_y, table_top_y, table_bottom_y, BOUNDARY_TOLERANCE):
-            buyer_seller_words.append(word)
-            continue
-        
-        # 优先级4：最后的备选方案（根据Y坐标推断）
-        if header_bottom_y and word_y < header_bottom_y:
-            header_words.append(word)
-        elif table_top_y and word_y > table_top_y:
-            table_words.append(word)
-        else:
-            # 默认归入购销方
-            buyer_seller_words.append(word)
-    
-    logging.debug(f'3个大块分区结果: 发票头={len(header_words)}个单词, '
-                 f'购销方={len(buyer_seller_words)}个单词, 表格={len(table_words)}个单词')
-    
-    return header_words, buyer_seller_words, table_words
 
 
 def _assign_tax_id_by_name_position(
@@ -1591,45 +1204,45 @@ def print_partition_content(
         seller_words: 销售方区域的单词
         table_words: 表格区域的单词
     """
-    print("\n" + "="*80)
-    print("发票分区内容")
-    print("="*80)
+    # print("\n" + "="*80)
+    # print("发票分区内容")
+    # print("="*80)
     
     # 发票头区域
-    print("\n【发票头区域】")
-    print("-" * 80)
+    # print("\n【发票头区域】")
+    # print("-" * 80)
     header_text = reconstruct_text_from_words(header_words)
-    if header_text:
-        print(header_text)
-    else:
-        print("(空)")
+    # if header_text:
+    #     print(header_text)
+    # else:
+    #     print("(空)")
     
     # 购买方区域
-    print("\n【购买方区域】")
-    print("-" * 80)
+    # print("\n【购买方区域】")
+    # print("-" * 80)
     buyer_text = reconstruct_text_from_words(buyer_words)
-    if buyer_text:
-        print(buyer_text)
-    else:
-        print("(空)")
+    # if buyer_text:
+    #     print(buyer_text)
+    # else:
+    #     print("(空)")
     
     # 销售方区域
-    print("\n【销售方区域】")
-    print("-" * 80)
+    # print("\n【销售方区域】")
+    # print("-" * 80)
     seller_text = reconstruct_text_from_words(seller_words)
-    if seller_text:
-        print(seller_text)
-    else:
-        print("(空)")
+    # if seller_text:
+    #     print(seller_text)
+    # else:
+    #     print("(空)")
     
     # 表格区域
-    print("\n【表格区域】")
-    print("-" * 80)
+    # print("\n【表格区域】")
+    # print("-" * 80)
     table_text = reconstruct_text_from_words(table_words)
-    if table_text:
-        print(table_text)
-    else:
-        print("(空)")
+    # if table_text:
+    #     print(table_text)
+    # else:
+    #     print("(空)")
     
-    print("\n" + "="*80)
+    # print("\n" + "="*80)
 
