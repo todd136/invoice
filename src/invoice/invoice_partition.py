@@ -7,6 +7,8 @@ import math
 import re
 from typing import List, Optional, Tuple
 
+from .text_utils import clean_garbled_chars
+
 # 获取模块级别的日志记录器
 logger = logging.getLogger(__name__)
 
@@ -233,7 +235,7 @@ def filter_bottom_lines_from_grouped_data(
         # 1. 检查是否包含底部关键词
         line_text = ' '.join([w['text'] for w in line_words])
         if any(kw in line_text for kw in ['价税合计', '合计', '备注', '注', '开票人', '收款人', '复核人',
-                                          '购方开户银行', '销方开户银行', '银行账号', '开户银行']):
+                                          '购方开户银行', '销方开户银行', '银行账号', '开户银行', '¥']):
             should_filter = True
         
         # 2. 使用Y坐标过滤
@@ -442,7 +444,7 @@ def find_table_bottom_boundary(words: List[dict]) -> Optional[float]:
     if bottom_y_coords:
         # 返回最小的Y坐标（最靠上的底部关键词）
         table_bottom = min(bottom_y_coords)
-        # logger.debug(f'识别到表格底部边界: Y={table_bottom:.2f} (基于关键词: {bottom_keywords})')
+        logger.debug(f'识别到表格底部边界: Y={table_bottom:.2f} (基于关键词: {bottom_keywords})')
         return table_bottom
     
     logger.debug('未找到表格底部关键词，不设置底部边界')
@@ -953,33 +955,67 @@ def split_buyer_seller(
     buyer_words = []
     seller_words = []
     
-    for word in buyer_seller_words:
-        word_x = word['x0']
-        word_text = word['text']
+    # 如果没有找到分界线，尝试按行分组处理，识别同一行中的两个"名称："
+    if not buyer_seller_divider:
+        # 按行分组
+        lines_dict = group_words_by_y(buyer_seller_words, y_tolerance=3.0)
+        sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
         
-        if buyer_seller_divider:
-            # 使用分界线区分
+        for y, line_words in sorted_lines:
+            # 按X坐标排序
+            sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
+            
+            # 查找该行中所有包含"名称"的单词
+            name_keywords = []
+            for word in sorted_line_words:
+                word_text = clean_garbled_chars(word['text'])
+                if '名称' in word_text:
+                    name_keywords.append(word)
+            
+            # 如果一行中有两个"名称："，使用它们之间的中点作为分界线
+            if len(name_keywords) >= 2:
+                # 找到第一个和第二个"名称："的X坐标
+                first_name_x = name_keywords[0]['x0']
+                second_name_x = name_keywords[1]['x0']
+                divider_x = (first_name_x + second_name_x) / 2
+                
+                logger.debug(f'行Y={y:.2f}: 找到两个"名称："，使用X={divider_x:.2f}作为分界线')
+                
+                # 将该行的单词分配到购买方或销售方
+                for word in sorted_line_words:
+                    if word['x0'] < divider_x:
+                        buyer_words.append(word)
+                    else:
+                        seller_words.append(word)
+            else:
+                # 只有一个或没有"名称："，使用原来的逻辑
+                for word in sorted_line_words:
+                    word_x = word['x0']
+                    word_text = word['text']
+                    
+                    # 检查是否是税号
+                    if re.match(r'^[0-9A-Z]{15,20}$', word_text.replace(' ', '')):
+                        # 这是税号，需要根据同一行的其他内容判断
+                        assignment = _assign_tax_id_by_name_position(word, buyer_seller_words, page_width)
+                        if assignment == 'buyer':
+                            buyer_words.append(word)
+                        else:
+                            seller_words.append(word)
+                    else:
+                        # 根据关键词或X坐标判断
+                        assignment = _assign_word_by_keyword_or_position(word, page_width)
+                        if assignment == 'buyer':
+                            buyer_words.append(word)
+                        else:
+                            seller_words.append(word)
+    else:
+        # 使用分界线区分
+        for word in buyer_seller_words:
+            word_x = word['x0']
             if word_x < buyer_seller_divider['x0']:
                 buyer_words.append(word)
             else:
                 seller_words.append(word)
-        else:
-            # 使用关键词和X坐标结合判断
-            # 检查是否是税号
-            if re.match(r'^[0-9A-Z]{15,20}$', word_text.replace(' ', '')):
-                # 这是税号，需要根据同一行的其他内容判断
-                assignment = _assign_tax_id_by_name_position(word, buyer_seller_words, page_width)
-                if assignment == 'buyer':
-                    buyer_words.append(word)
-                else:
-                    seller_words.append(word)
-            else:
-                # 根据关键词或X坐标判断
-                assignment = _assign_word_by_keyword_or_position(word, page_width)
-                if assignment == 'buyer':
-                    buyer_words.append(word)
-                else:
-                    seller_words.append(word)
     
     logger.debug(f'购销方拆分结果: 购买方={len(buyer_words)}个单词, 销售方={len(seller_words)}个单词')
     
@@ -1207,45 +1243,45 @@ def print_partition_content(
         seller_words: 销售方区域的单词
         table_words: 表格区域的单词
     """
-    # print("\n" + "="*80)
-    # print("发票分区内容")
-    # print("="*80)
+    print("\n" + "="*80)
+    print("发票分区内容")
+    print("="*80)
     
     # 发票头区域
-    # print("\n【发票头区域】")
-    # print("-" * 80)
+    print("\n【发票头区域】")
+    print("-" * 80)
     header_text = reconstruct_text_from_words(header_words)
-    # if header_text:
-    #     print(header_text)
-    # else:
-    #     print("(空)")
+    if header_text:
+        print(header_text)
+    else:
+        print("(空)")
     
     # 购买方区域
-    # print("\n【购买方区域】")
-    # print("-" * 80)
+    print("\n【购买方区域】")
+    print("-" * 80)
     buyer_text = reconstruct_text_from_words(buyer_words)
-    # if buyer_text:
-    #     print(buyer_text)
-    # else:
-    #     print("(空)")
+    if buyer_text:
+        print(buyer_text)
+    else:
+        print("(空)")
     
     # 销售方区域
-    # print("\n【销售方区域】")
-    # print("-" * 80)
+    print("\n【销售方区域】")
+    print("-" * 80)
     seller_text = reconstruct_text_from_words(seller_words)
-    # if seller_text:
-    #     print(seller_text)
-    # else:
-    #     print("(空)")
+    if seller_text:
+        print(seller_text)
+    else:
+        print("(空)")
     
     # 表格区域
-    # print("\n【表格区域】")
-    # print("-" * 80)
+    print("\n【表格区域】")
+    print("-" * 80)
     table_text = reconstruct_text_from_words(table_words)
-    # if table_text:
-    #     print(table_text)
-    # else:
-    #     print("(空)")
-    
-    # print("\n" + "="*80)
+    if table_text:
+        print(table_text)
+    else:
+        print("(空)")
+
+    print("\n" + "="*80)
 
