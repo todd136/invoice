@@ -34,7 +34,7 @@ SUMMARY_ROW_KEYWORDS = ['合计', '价税合计', '备注', '开票人']  # 合�
 
 def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
     """
-    使用 pdfplumber 提取PDF中的发票信息
+    使用 pdfplumber 提取PDF中的发票信息（支持多页发票）
     
     Args:
         pdf_file_path: PDF 文件路径
@@ -52,47 +52,102 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
 
     try:
         with pdfplumber.open(pdf_file_path) as pdf:
-            # 电子发票通常只有一页
-            page = pdf.pages[0]
+            total_pages = len(pdf.pages)
+            logger.info(f'发票共有 {total_pages} 页')
 
-            # 1. 提取文本内容（过滤掉印章红色文字）
-            words = page.extract_words(
-                x_tolerance=5,  # 增大水平容差，帮助合并同一行的字符
-                y_tolerance=2,
-                keep_blank_chars=False,
-                use_text_flow=True  # 使用文本流逻辑重组，解决乱序
-            )
+            # 存储第一页的分区结果（用于提取基本信息和列坐标）
+            first_page_header_words = None
+            first_page_buyer_words = None
+            first_page_table_words = None
+            
+            # 存储所有页面的 raw_items（未合并的明细项）
+            all_raw_items = []
 
-            # 过滤掉印章文字（红色）
-            clean_words = filter_seal_text(page, words)
+            # 遍历所有页面进行处理
+            for page_idx, page in enumerate(pdf.pages):
+                logger.info(f'处理第 {page_idx + 1}/{total_pages} 页...')
 
-            # 2. 使用分割线进行发票分区
-            logger.info('开始使用分割线进行发票分区...')
-            header_words, buyer_words, seller_words, table_words = partition_invoice_by_lines(
-                page, clean_words
-            )
-            # 打印各分区内容（调试用）
-            print_partition_content(header_words, buyer_words, seller_words, table_words)
+                # 1. 提取文本内容（过滤掉印章红色文字）
+                words = page.extract_words(
+                    x_tolerance=5,  # 增大水平容差，帮助合并同一行的字符
+                    y_tolerance=2,
+                    keep_blank_chars=False,
+                    use_text_flow=True  # 使用文本流逻辑重组，解决乱序
+                )
 
-            # 3. 提取发票基本信息（从分区后的内容）
-            code, date, buyer, buyer_tax_id, invoice_type = extract_basic_info(
-                header_words, buyer_words
-            )
+                # 过滤掉印章文字（红色）
+                clean_words = filter_seal_text(page, words)
 
-            invoice.code = code
-            invoice.date = date
-            invoice.buyer = buyer
-            invoice.buyer_tax_id = buyer_tax_id
-            invoice.invoice_type = invoice_type
+                # 2. 使用分割线进行发票分区（对每页都进行分区）
+                logger.info(f'开始使用分割线对第 {page_idx + 1} 页进行发票分区...')
+                header_words, buyer_words, seller_words, table_words = partition_invoice_by_lines(
+                    page, clean_words
+                )
+                
+                # 如果是第一页，保存分区结果用于提取基本信息和列坐标，并打印调试信息
+                if page_idx == 0:
+                    first_page_header_words = header_words
+                    first_page_buyer_words = buyer_words
+                    first_page_table_words = table_words
+                    # 打印各分区内容（调试用）
+                    print_partition_content(header_words, buyer_words, seller_words, table_words)
+                else:
+                    logger.debug(f'第 {page_idx + 1} 页分区结果: 发票头={len(header_words)}个单词, '
+                               f'购买方={len(buyer_words)}个单词, '
+                               f'销售方={len(seller_words)}个单词, '
+                               f'表格={len(table_words)}个单词')
 
-            # 4. 解析商品明细（从表格区域的单词）
-            invoice.items = parse_line_items_from_words(table_words, pdf_file_path)
+                # 从当前页面的 table_words 提取 raw_items（不进行跨行合并）
+                if table_words:
+                    page_raw_items = parse_line_items_from_words_raw(
+                        table_words, pdf_file_path, page_idx + 1
+                    )
+                    if page_raw_items:
+                        all_raw_items.extend(page_raw_items)
+                        logger.info(f'第 {page_idx + 1} 页提取到 {len(page_raw_items)} 条原始明细项')
+
+            # 3. 提取发票基本信息（只使用第一页的分区结果）
+            if first_page_header_words is not None and first_page_buyer_words is not None:
+                code, date, buyer, buyer_tax_id, invoice_type = extract_basic_info(
+                    first_page_header_words, first_page_buyer_words
+                )
+
+                invoice.code = code
+                invoice.date = date
+                invoice.buyer = buyer
+                invoice.buyer_tax_id = buyer_tax_id
+                invoice.invoice_type = invoice_type
+            else:
+                logger.warning(f'未能从第一页提取到分区数据，基本信息可能为空')
+
+            # 4. 解析商品明细（合并所有页面的 raw_items，然后进行跨行商品记录合并）
+            if all_raw_items:
+                logger.info(f'合并所有页面，共 {len(all_raw_items)} 条原始明细项')
+                # 需要获取列坐标信息用于跨行合并（使用第一页的表头信息）
+                if first_page_table_words:
+                    # 从第一页的 table_words 中识别列坐标（使用第一页的表头）
+                    col_x_starts = _extract_column_starts_from_table_words(
+                        first_page_table_words, pdf_file_path
+                    )
+                    # 对所有页面的 raw_items 进行跨行商品记录合并
+                    invoice.items = merge_split_line_items(all_raw_items, col_x_starts, pdf_file_path)
+                else:
+                    # 如果没有第一页的 table_words，直接使用 raw_items（不进行跨行合并）
+                    logger.warning(f'未能从第一页提取到表格数据，跳过跨行合并')
+                    invoice.items = all_raw_items
+            else:
+                # 如果没有 raw_items，尝试使用传统方法解析（兼容处理，仅处理第一页）
+                logger.warning(f'未能提取到原始明细项，尝试使用传统方法解析第一页')
+                if first_page_table_words:
+                    invoice.items = parse_line_items_from_words(first_page_table_words, pdf_file_path)
+                else:
+                    invoice.items = []
 
             # 验证解析结果
             if not invoice.items:
                 raise Exception('未能解析到发票明细数据')
 
-            logger.info(f'发票 {pdf_file_path} 解析完成')
+            logger.info(f'发票 {pdf_file_path} 解析完成，共 {len(invoice.items)} 条明细')
             return invoice
 
     except Exception as e:
@@ -785,6 +840,97 @@ def _extract_item_from_row(
         return item
     
     return None
+
+
+def parse_line_items_from_words_raw(table_words: List[dict], pdf_path: str = '', page_num: int = 1) -> List[LineItem]:
+    """
+    从表格区域的单词列表中解析明细行（返回原始明细项，不进行跨行合并）
+    
+    用于多页发票处理：分别提取每页的 raw_items，然后统一进行跨行合并
+    
+    Args:
+        table_words: 表格区域的单词列表
+        pdf_path: PDF 文件路径（用于日志）
+        page_num: 页码（用于日志）
+        
+    Returns:
+        原始商品明细列表（未合并）
+    """
+    if not table_words or len(table_words) == 0:
+        logger.debug(f'{pdf_path} 第{page_num}页: 表格数据为空，无法解析明细')
+        return []
+
+    # 将单词按行分组
+    lines_dict = group_words_by_y(table_words, y_tolerance=3.0)
+    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
+
+    logger.debug(f'{pdf_path} 第{page_num}页: 表格共有 {len(sorted_lines)} 行')
+
+    # 找到表头行
+    header_row_y = _find_header_row(sorted_lines, pdf_path)
+    if header_row_y is None:
+        logger.debug(f'{pdf_path} 第{page_num}页: 未找到表头行')
+        return []
+
+    # 识别各列的X坐标范围（通过表头行的单词位置）
+    header_line_words = sorted(lines_dict[header_row_y], key=lambda w: w['x0'])
+    keyword_words = _match_keywords_to_words(header_line_words, pdf_path)
+    col_x_ranges, _ = _calculate_column_ranges(keyword_words, pdf_path)
+
+    # 遍历数据行（表头行之后的行），提取字段（不进行跨行合并）
+    raw_items = []
+    header_found = False
+    
+    for y, line_words in sorted_lines:
+        # 跳过表头行
+        if y == header_row_y:
+            header_found = True
+            continue
+        if not header_found:
+            continue
+        
+        # 从当前行提取明细项
+        item = _extract_item_from_row(y, line_words, col_x_ranges, pdf_path)
+        if item:
+            raw_items.append(item)
+    
+    logger.debug(f'{pdf_path} 第{page_num}页: 提取到 {len(raw_items)} 条原始明细项（未合并）')
+    
+    return raw_items
+
+
+def _extract_column_starts_from_table_words(table_words: List[dict], pdf_path: str = '') -> dict:
+    """
+    从表格区域的单词列表中提取列坐标信息（用于跨行合并）
+    
+    通过查找表头行来识别各列的X坐标
+    
+    Args:
+        table_words: 表格区域的单词列表（可能包含多页数据）
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        各列的首字x0坐标字典 {keyword: x0}
+    """
+    if not table_words or len(table_words) == 0:
+        return {}
+    
+    # 将单词按行分组
+    lines_dict = group_words_by_y(table_words, y_tolerance=3.0)
+    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
+    
+    # 找到表头行（通常是第一行或包含表头关键词的行）
+    header_row_y = _find_header_row(sorted_lines, pdf_path)
+    if header_row_y is None:
+        logger.warning(f'{pdf_path}: 未能找到表头行，无法提取列坐标信息')
+        return {}
+    
+    # 识别各列的X坐标范围（通过表头行的单词位置）
+    header_line_words = sorted(lines_dict[header_row_y], key=lambda w: w['x0'])
+    keyword_words = _match_keywords_to_words(header_line_words, pdf_path)
+    _, col_x_starts = _calculate_column_ranges(keyword_words, pdf_path)
+    
+    return col_x_starts
 
 
 def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> List[LineItem]:
