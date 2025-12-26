@@ -25,6 +25,13 @@ from .invoice_partition import (
 # 获取模块级别的日志记录器
 logger = logging.getLogger(__name__)
 
+# 表格解析相关常量
+TABLE_KEYWORDS = ['项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额']
+MIN_HEADER_KEYWORDS = 3  # 表头行至少需要包含的关键词数量
+COLUMN_X_TOLERANCE = 10  # 列X坐标范围扩展容差（像素）
+WORD_DISTANCE_THRESHOLD = 30  # 拆分关键词的单词距离阈值（像素）
+SUMMARY_ROW_KEYWORDS = ['合计', '价税合计', '备注', '开票人']  # 合计行关键词
+
 def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
     """
     使用 pdfplumber 提取PDF中的发票信息
@@ -97,6 +104,8 @@ def filter_seal_text(page, words: List[dict]) -> List[dict]:
     """
     过滤掉印章文字（红色）
     
+    特殊处理：即使文字是红色，如果包含"增值税"或"普通发票"关键字，也不过滤
+    
     Args:
         page: pdfplumber Page 对象
         words: 提取的单词列表
@@ -106,8 +115,20 @@ def filter_seal_text(page, words: List[dict]) -> List[dict]:
     """
     clean_words = []
     chars = page.chars  # 获取所有字符
+    
+    # 需要保留的关键字（即使红色也不过滤）
+    protected_keywords = ['增值税', '普通发票']
 
     for w in words:
+        # 检查单词文本是否包含需要保护的关键字
+        word_text = w.get('text', '')
+        is_protected = any(keyword in word_text for keyword in protected_keywords)
+        
+        # 如果包含保护关键字，直接保留，不检查颜色
+        if is_protected:
+            clean_words.append(w)
+            continue
+        
         # 找到该词对应的字符，通过位置匹配
         word_chars = []
         for char in chars:
@@ -253,21 +274,26 @@ def extract_buyer_name_from_words(buyer_words: List[dict]) -> str:
     # 基本清洗
     buyer_text = clean_garbled_chars(buyer_text)
     
-    # 策略1：从"名称："后面提取
-    name_pattern = re.compile(r'名称[：:]\s*([^\n]+?)(?:\s*(?:统一社会信用代码|纳税人识别号)|$)')
+    # 策略1：从"名称："后面提取，直到遇到"统一社会信用代码"或"纳税人识别号"
+    # 使用正向先行断言，匹配"名称："后面到"统一社会信用代码"/"纳税人识别号"之前的内容
+    # 使用非贪婪匹配，但确保能匹配到完整内容
+    name_pattern = re.compile(r'名称[：:]\s*((?:(?!统一社会信用代码|纳税人识别号).)+?)(?=\s*(?:统一社会信用代码|纳税人识别号)|$)', re.DOTALL)
     match = name_pattern.search(buyer_text)
     if match:
         buyer = match.group(1).strip()
-        # 如果提取的内容包含关键词，截取到关键词之前
-        stop_keywords = ['统一社会信用代码', '纳税人识别号', '销售方', '购买方']
+        # 清理可能包含的换行符，但保留空格（公司名称中可能有空格）
+        buyer = re.sub(r'\s*\n\s*', '', buyer)  # 去掉换行符及其周围的空格
+        buyer = re.sub(r'\s+', ' ', buyer)  # 将多个连续空格合并为一个
+        # 如果提取的内容包含关键词，截取到关键词之前（双重保险）
+        stop_keywords = ['统一社会信用代码', '纳税人识别号', '销售方', '购买方', '买方', '卖方', '信息']
         for kw in stop_keywords:
             if kw in buyer:
                 idx = buyer.index(kw)
                 if idx > 0:
                     buyer = buyer[:idx].strip()
                     break
-        # 排除税号
-        if not is_tax_id(buyer) and not re.match(r'^\d{12,}$', buyer):
+        # 排除税号（如果提取的内容是纯税号，则跳过）
+        if buyer and not is_tax_id(buyer) and not re.match(r'^\d{12,}$', buyer):
             return buyer
 
     # 策略2：匹配公司名称模式
@@ -383,78 +409,87 @@ def extract_invoice_type_from_words(header_words: List[dict]) -> str:
     return ''
 
 
-def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> List[LineItem]:
+def _find_header_row(sorted_lines: List[Tuple[float, List[dict]]], pdf_path: str = '') -> Optional[float]:
     """
-    从表格区域的单词列表中解析明细行
+    查找表头行
+    
+    由于输入已经是分离出来的发票明细数据，第一行就是表头行，
+    直接检查第一行是否包含足够的表头关键词进行校验。
     
     Args:
-        table_words: 表格区域的单词列表
+        sorted_lines: 按Y坐标排序的行列表
         pdf_path: PDF 文件路径（用于日志）
         
     Returns:
-        商品明细列表
+        表头行的Y坐标，如果未找到返回None
     """
-    items = []
-
-    if not table_words or len(table_words) == 0:
-        logger.warning(f'{pdf_path}: 表格数据为空，无法解析明细')
-        return items
-
-    # 将单词按行分组
-    lines_dict = group_words_by_y(table_words, y_tolerance=3.0)
-    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
-
-    logger.debug(f'{pdf_path}: 表格共有 {len(sorted_lines)} 行')
-
-    # 找到表头行（包含"项目名称"的行）
-    header_row_y = None
-    table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额']
-
-    for y, line_words in sorted_lines:
-        # 合并整行的文本
+    if not sorted_lines:
+        logger.warning(f'{pdf_path}: 表格数据为空')
+        return None
+    
+    # 直接检查第一行（表头行）
+    y, line_words = sorted_lines[0]
+    row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
+    
+    # 查找表头关键词
+    keyword_count = sum(1 for kw in TABLE_KEYWORDS if kw in row_text)
+    if keyword_count >= MIN_HEADER_KEYWORDS:
+        logger.debug(f'{pdf_path}: 找到表头行，Y={y:.2f}, 内容: {row_text[:100]}')
+        return y
+    
+    # 如果第一行不符合，尝试查找其他行（兼容处理）
+    logger.warning(f'{pdf_path}: 第一行不符合表头要求（包含{keyword_count}个关键词，需要至少{MIN_HEADER_KEYWORDS}个），尝试查找其他行')
+    for y, line_words in sorted_lines[1:]:
         row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
-
-        # 查找表头关键词
-        keyword_count = sum(1 for kw in table_keywords if kw in row_text)
-        if keyword_count >= 3:  # 至少包含3个表头关键词
-            header_row_y = y
+        keyword_count = sum(1 for kw in TABLE_KEYWORDS if kw in row_text)
+        if keyword_count >= MIN_HEADER_KEYWORDS:
             logger.debug(f'{pdf_path}: 找到表头行，Y={y:.2f}, 内容: {row_text[:100]}')
-            break
+            return y
+    
+    logger.warning(f'{pdf_path}: 未找到表头行（需要包含至少{MIN_HEADER_KEYWORDS}个表头关键词）')
+    # 打印前几行内容帮助调试
+    for i, (y, line_words) in enumerate(sorted_lines[:5]):
+        row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
+        logger.debug(f'{pdf_path}: 表格第 {i} 行 (Y={y:.2f}): {row_text[:100]}')
+    return None
 
-    if header_row_y is None:
-        logger.warning(f'{pdf_path}: 未找到表头行（需要包含至少3个表头关键词）')
-        # 打印前几行内容帮助调试
-        for i, (y, line_words) in enumerate(sorted_lines[:5]):
-            row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
-            logger.debug(f'{pdf_path}: 表格第 {i} 行 (Y={y:.2f}): {row_text[:100]}')
-        return items
 
-    # 识别各列的X坐标范围（通过表头行的单词位置）
-    # 先找到每个关键词对应的所有单词（可能被拆分成多个）
+def _match_keywords_to_words(header_line_words: List[dict], pdf_path: str = '') -> dict:
+    """
+    匹配表头关键词到对应的单词
+    
+    使用两种策略：
+    1. 直接匹配：关键词完整出现在单词中
+    2. 拆分匹配：处理被拆分的关键词（如"单位"被拆成"单"和"位"）
+    
+    Args:
+        header_line_words: 表头行的单词列表（已按x0排序）
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        {keyword: [word1, word2, ...]} 字典
+    """
     keyword_words = {}  # {keyword: [word1, word2, ...]}
-    header_line_words = sorted(lines_dict[header_row_y], key=lambda w: w['x0'])
     
     # 打印表头行的x0坐标信息
     logger.debug(f'{pdf_path}: ================================================================================')
-    logger.debug(f'{pdf_path}: 表头行 (Y={header_row_y:.2f}) X坐标信息:')
+    logger.debug(f'{pdf_path}: 表头行 X坐标信息:')
     logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
     for word in header_line_words:
         word_text = clean_garbled_chars(word['text'])
         logger.debug(f'{pdf_path}:   单词: "{word_text:20s}" | x0={word["x0"]:8.2f} | x1={word["x1"]:8.2f} | 中心={((word["x0"]+word["x1"])/2):8.2f}')
     
-    # 收集每个关键词对应的所有单词
     # 方法1：直接匹配（关键词完整出现在单词中）
     for word in header_line_words:
         word_text = clean_garbled_chars(word['text'])
-        for keyword in table_keywords:
+        for keyword in TABLE_KEYWORDS:
             if keyword in word_text:
                 if keyword not in keyword_words:
                     keyword_words[keyword] = []
                 keyword_words[keyword].append(word)
     
     # 方法2：处理被拆分的关键词（如"单位"被拆成"单"和"位"）
-    # 对于每个关键词，找到所有包含其字符的单词，然后根据X坐标连续性判断
-    for keyword in table_keywords:
+    for keyword in TABLE_KEYWORDS:
         if keyword in keyword_words:
             continue  # 已经找到完整匹配，跳过
         
@@ -482,9 +517,9 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
                 for w2 in char2_words:
                     if w1 == w2:
                         continue
-                    # 检查X坐标是否相邻（距离小于30像素）
+                    # 检查X坐标是否相邻（距离小于阈值）
                     distance = abs(w2['x0'] - w1['x1'])
-                    if distance < 30:
+                    if distance < WORD_DISTANCE_THRESHOLD:
                         # 找到匹配的单词对
                         keyword_words[keyword] = [w1, w2]
                         logger.debug(f'{pdf_path}:   列"{keyword}": 通过字符匹配找到相邻单词对: "{clean_garbled_chars(w1["text"])}" (x0={w1["x0"]:.2f}) + "{clean_garbled_chars(w2["text"])}" (x0={w2["x0"]:.2f})')
@@ -497,25 +532,294 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
             if candidate_words:
                 keyword_words[keyword] = candidate_words[:1]  # 取第一个匹配的单词
     
-    # 为每个关键词计算列的X坐标范围（包含所有相关单词）
+    return keyword_words
+
+
+def _calculate_column_ranges(keyword_words: dict, pdf_path: str = '') -> Tuple[dict, dict]:
+    """
+    计算各列的X坐标范围
+    
+    Args:
+        keyword_words: {keyword: [word1, word2, ...]} 字典
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        (col_x_ranges, col_x_starts) 元组
+        - col_x_ranges: {keyword: (x0, x1)} 列的X坐标范围
+        - col_x_starts: {keyword: x0} 列的首字x0坐标
+    """
     col_x_ranges = {}
     col_x_starts = {}  # 记录每列的首字x0坐标（用于匹配明细数据）
+    
     for keyword, words in keyword_words.items():
         if not words:
             continue
         # 找到该关键词所有单词的最小x0和最大x1
         min_x0 = min(w['x0'] for w in words)
         max_x1 = max(w['x1'] for w in words)
-        # 扩展范围：左右各扩展10像素，以便匹配同一列的其他单词（减少扩展范围，避免跨列匹配）
-        col_x_ranges[keyword] = (min_x0 - 10, max_x1 + 10)
+        # 扩展范围：左右各扩展容差，以便匹配同一列的其他单词
+        col_x_ranges[keyword] = (min_x0 - COLUMN_X_TOLERANCE, max_x1 + COLUMN_X_TOLERANCE)
         col_x_starts[keyword] = min_x0  # 记录首字x0坐标
-        logger.debug(f'{pdf_path}:   列"{keyword}": 包含{len(words)}个单词, x0范围=[{min_x0:.2f}, {max_x1:.2f}], 扩展后=[{min_x0-10:.2f}, {max_x1+10:.2f}]')
+        logger.debug(f'{pdf_path}:   列"{keyword}": 包含{len(words)}个单词, x0范围=[{min_x0:.2f}, {max_x1:.2f}], 扩展后=[{min_x0-COLUMN_X_TOLERANCE:.2f}, {max_x1+COLUMN_X_TOLERANCE:.2f}]')
     
     logger.debug(f'{pdf_path}: ================================================================================')
+    
+    return col_x_ranges, col_x_starts
 
-    # 遍历数据行（表头行之后的行）
-    # 第一步：识别所有可能的数据行，并提取字段
-    raw_items = []  # 存储每行解析出的原始item
+
+def _create_column_matcher(col_x_ranges: dict, sorted_line_words: List[dict]) -> callable:
+    """
+    创建列匹配函数
+    
+    Args:
+        col_x_ranges: {keyword: (x0, x1)} 列的X坐标范围
+        sorted_line_words: 当前行的单词列表（已按x0排序）
+        
+    Returns:
+        函数 find_word_in_column(keyword: str) -> Optional[str]
+    """
+    def find_word_in_column(keyword: str) -> Optional[str]:
+        """在指定列中查找单词，返回该列中所有匹配单词的合并文本"""
+        if keyword not in col_x_ranges:
+            return None
+        col_x0, col_x1 = col_x_ranges[keyword]
+        # 计算列的中心点（用于选择最匹配的列）
+        col_center = (col_x0 + col_x1) / 2
+        
+        # 查找X坐标在列范围内的所有单词
+        matched_words = []
+        for word in sorted_line_words:
+            word_center = (word['x0'] + word['x1']) / 2
+            
+            # 特殊处理：对于项目名称列，如果单词中心坐标小于项目名称列的x0，
+            # 且没有匹配到其他列，则将其匹配到项目名称列（处理项目名称折行的情况）
+            is_item_name_column = (keyword == '项目名称')
+            if is_item_name_column and word_center < col_x0:
+                # 检查该单词是否匹配到其他列
+                matched_other = False
+                for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                    if other_keyword == keyword:
+                        continue
+                    if other_x0 <= word_center <= other_x1:
+                        matched_other = True
+                        break
+                
+                # 如果没有匹配到其他列，则匹配到项目名称列
+                if not matched_other:
+                    matched_words.append(word)
+                    continue
+            
+            # 优先使用单词中心点判断，确保更精确的匹配
+            # 只有当中心点在列范围内时，才认为该单词属于该列
+            if col_x0 <= word_center <= col_x1:
+                # 检查该单词是否也匹配到其他列（避免跨列匹配）
+                matched_other_columns = []
+                for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                    if other_keyword == keyword:
+                        continue
+                    if other_x0 <= word_center <= other_x1:
+                        other_col_center = (other_x0 + other_x1) / 2
+                        matched_other_columns.append((other_keyword, other_col_center))
+                
+                # 如果单词匹配到多个列，选择中心点最接近的列
+                if matched_other_columns:
+                    # 计算到当前列和其他列的距离
+                    current_distance = abs(word_center - col_center)
+                    other_distances = [(kw, abs(word_center - oc)) for kw, oc in matched_other_columns]
+                    min_other_distance = min(d for _, d in other_distances)
+                    
+                    # 如果当前列不是最接近的，跳过该单词
+                    if current_distance > min_other_distance:
+                        continue
+                
+                matched_words.append(word)
+        
+        if not matched_words:
+            return None
+        
+        # 合并该列中的所有单词（按X坐标排序）
+        matched_words.sort(key=lambda w: w['x0'])
+        result = ' '.join([clean_garbled_chars(w['text']).strip() for w in matched_words])
+        return result.strip() if result.strip() else None
+    
+    return find_word_in_column
+
+
+def _find_item_name(
+    sorted_line_words: List[dict],
+    col_x_ranges: dict,
+    find_word_in_column: callable,
+    pdf_path: str = ''
+) -> str:
+    """
+    查找项目名称
+    
+    策略：
+    1. 优先在项目名称列中查找
+    2. 如果列中没找到，查找最左侧包含中文的单词
+    
+    Args:
+        sorted_line_words: 当前行的单词列表（已按x0排序）
+        col_x_ranges: 列的X坐标范围字典
+        find_word_in_column: 列匹配函数
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        项目名称字符串
+    """
+    item_name = ''
+    
+    # 方法1：在项目名称列中查找
+    if '项目名称' in col_x_ranges:
+        item_name = find_word_in_column('项目名称') or ''
+        # 如果找到的是项目名称模式，直接使用
+        if item_name and PROJECT_NAME_REGEX.search(item_name):
+            pass  # 已经是项目名称格式
+        elif item_name and not re.search(r'[\u4e00-\u9fa5]', item_name):
+            # 如果找到的不是中文，可能不是项目名称，清空
+            item_name = ''
+    
+    # 方法2：如果列中没找到，查找最左侧包含中文的单词
+    if not item_name:
+        for word in sorted_line_words:
+            candidate_text = clean_garbled_chars(word['text'])
+            # 首先尝试严格匹配（*项目名称*费用名称）
+            if PROJECT_NAME_REGEX.search(candidate_text):
+                item_name = candidate_text.strip()
+                break
+            # 如果严格匹配失败，尝试放宽条件：包含中文且不是纯数字
+            elif re.search(r'[\u4e00-\u9fa5]', candidate_text) and not re.match(r'^[\d\s\.]+$', candidate_text):
+                # 检查是否可能是项目名称（长度合理，包含中文）
+                if len(candidate_text.strip()) >= 2 and len(candidate_text.strip()) <= 100:
+                    item_name = candidate_text.strip()
+                    logger.debug(f'{pdf_path}: 使用放宽条件匹配到项目名称: {item_name[:50]}')
+                    break
+    
+    return item_name
+
+
+def _extract_item_from_row(
+    y: float,
+    line_words: List[dict],
+    col_x_ranges: dict,
+    pdf_path: str = ''
+) -> Optional[LineItem]:
+    """
+    从单行数据中提取明细项
+    
+    Args:
+        y: 行的Y坐标
+        line_words: 行的单词列表
+        col_x_ranges: 列的X坐标范围字典
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        LineItem 对象，如果该行不是有效明细行则返回None
+    """
+    if not line_words:
+        return None
+    
+    # 检查是否是合计行或其他非明细行
+    row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])]).lower()
+    if any(kw in row_text for kw in SUMMARY_ROW_KEYWORDS):
+        return None
+    
+    # 按X坐标排序单词
+    sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
+    
+    # 创建列匹配器
+    find_word_in_column = _create_column_matcher(col_x_ranges, sorted_line_words)
+    
+    # 查找项目名称
+    item_name = _find_item_name(sorted_line_words, col_x_ranges, find_word_in_column, pdf_path)
+    
+    # 创建明细项
+    item = LineItem()
+    item.item_name = item_name
+    item.spec = find_word_in_column('规格型号') or ''
+    item.unit = find_word_in_column('单位') or ''
+    item.quantity = find_word_in_column('数量') or ''
+    item.price = find_word_in_column('单价') or ''
+    item.amount = find_word_in_column('金额') or ''
+    item.tax_rate = find_word_in_column('税率') or ''
+    item.tax_amount = find_word_in_column('税额') or ''
+    
+    # 如果这一行有任何字段，就保留（可能是明细行的一部分）
+    if item.item_name or item.spec or item.unit or item.quantity or item.price or item.amount:
+        # 打印明细数据行的x0坐标信息
+        logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
+        logger.debug(f'{pdf_path}: 明细数据行 (Y={y:.2f}) X坐标信息:')
+        for word in sorted_line_words:
+            word_text = clean_garbled_chars(word['text'])
+            # 判断该单词属于哪一列（与find_word_in_column逻辑保持一致）
+            matched_columns = []
+            word_center = (word['x0'] + word['x1']) / 2
+            
+            for keyword, (col_x0, col_x1) in col_x_ranges.items():
+                # 特殊处理：对于项目名称列，如果单词中心坐标小于项目名称列的x0，
+                # 且没有匹配到其他列，则将其匹配到项目名称列
+                is_item_name_column = (keyword == '项目名称')
+                if is_item_name_column and word_center < col_x0:
+                    # 检查该单词是否匹配到其他列
+                    matched_other = False
+                    for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                        if other_keyword == keyword:
+                            continue
+                        if other_x0 <= word_center <= other_x1:
+                            matched_other = True
+                            break
+                    # 如果没有匹配到其他列，则匹配到项目名称列
+                    if not matched_other:
+                        matched_columns.append(keyword)
+                        continue
+                
+                # 常规匹配：中心点在列范围内
+                if col_x0 <= word_center <= col_x1:
+                    matched_columns.append(keyword)
+            
+            column_info = f' -> [{", ".join(matched_columns)}]' if matched_columns else ' -> [未匹配到列]'
+            logger.debug(f'{pdf_path}:   单词: "{word_text:20s}" | x0={word["x0"]:8.2f} | x1={word["x1"]:8.2f} | 中心={((word["x0"]+word["x1"])/2):8.2f}{column_info}')
+        
+        logger.debug(f'{pdf_path}: 解析结果: 项目名称="{item.item_name}", 金额="{item.amount}", 规格="{item.spec}", 单位="{item.unit}", 数量="{item.quantity}", 单价="{item.price}", 税率="{item.tax_rate}", 税额="{item.tax_amount}"')
+        logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
+        return item
+    
+    return None
+
+
+def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> List[LineItem]:
+    """
+    从表格区域的单词列表中解析明细行
+    
+    Args:
+        table_words: 表格区域的单词列表
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        商品明细列表
+    """
+    if not table_words or len(table_words) == 0:
+        logger.warning(f'{pdf_path}: 表格数据为空，无法解析明细')
+        return []
+
+    # 将单词按行分组
+    lines_dict = group_words_by_y(table_words, y_tolerance=3.0)
+    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
+
+    logger.debug(f'{pdf_path}: 表格共有 {len(sorted_lines)} 行')
+
+    # 找到表头行
+    header_row_y = _find_header_row(sorted_lines, pdf_path)
+    if header_row_y is None:
+        return []
+
+    # 识别各列的X坐标范围（通过表头行的单词位置）
+    header_line_words = sorted(lines_dict[header_row_y], key=lambda w: w['x0'])
+    keyword_words = _match_keywords_to_words(header_line_words, pdf_path)
+    col_x_ranges, col_x_starts = _calculate_column_ranges(keyword_words, pdf_path)
+
+    # 遍历数据行（表头行之后的行），提取字段
+    raw_items = []
     header_found = False
     
     for y, line_words in sorted_lines:
@@ -526,126 +830,12 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
         if not header_found:
             continue
         
-        if not line_words:
-            continue
-
-        # 检查是否是合计行或其他非明细行
-        row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])]).lower()
-        if any(kw in row_text for kw in ['合计', '价税合计', '备注', '开票人']):
-            continue
-
-        # 按X坐标排序单词
-        sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
-        
-        # 提取字段（基于列的位置）
-        def find_word_in_column(keyword: str) -> Optional[str]:
-            """在指定列中查找单词，返回该列中所有匹配单词的合并文本"""
-            if keyword not in col_x_ranges:
-                return None
-            col_x0, col_x1 = col_x_ranges[keyword]
-            # 计算列的中心点（用于选择最匹配的列）
-            col_center = (col_x0 + col_x1) / 2
-            
-            # 查找X坐标在列范围内的所有单词
-            matched_words = []
-            for word in sorted_line_words:
-                word_center = (word['x0'] + word['x1']) / 2
-                # 优先使用单词中心点判断，确保更精确的匹配
-                # 只有当中心点在列范围内时，才认为该单词属于该列
-                if col_x0 <= word_center <= col_x1:
-                    # 检查该单词是否也匹配到其他列（避免跨列匹配）
-                    matched_other_columns = []
-                    for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
-                        if other_keyword == keyword:
-                            continue
-                        if other_x0 <= word_center <= other_x1:
-                            other_col_center = (other_x0 + other_x1) / 2
-                            matched_other_columns.append((other_keyword, other_col_center))
-                    
-                    # 如果单词匹配到多个列，选择中心点最接近的列
-                    if matched_other_columns:
-                        # 计算到当前列和其他列的距离
-                        current_distance = abs(word_center - col_center)
-                        other_distances = [(kw, abs(word_center - oc)) for kw, oc in matched_other_columns]
-                        min_other_distance = min(d for _, d in other_distances)
-                        
-                        # 如果当前列不是最接近的，跳过该单词
-                        if current_distance > min_other_distance:
-                            continue
-                    
-                    matched_words.append(word)
-            
-            if not matched_words:
-                return None
-            
-            # 合并该列中的所有单词（按X坐标排序）
-            matched_words.sort(key=lambda w: w['x0'])
-            result = ' '.join([clean_garbled_chars(w['text']).strip() for w in matched_words])
-            return result.strip() if result.strip() else None
-        
-        # 查找项目名称（优先查找最左侧包含中文的单词，或在项目名称列中查找）
-        item_name = ''
-        
-        # 方法1：在项目名称列中查找
-        if '项目名称' in col_x_ranges:
-            item_name = find_word_in_column('项目名称') or ''
-            # 如果找到的是项目名称模式，直接使用
-            if item_name and PROJECT_NAME_REGEX.search(item_name):
-                pass  # 已经是项目名称格式
-            elif item_name and not re.search(r'[\u4e00-\u9fa5]', item_name):
-                # 如果找到的不是中文，可能不是项目名称，清空
-                item_name = ''
-        
-        # 方法2：如果列中没找到，查找最左侧包含中文的单词
-        if not item_name:
-            for word in sorted_line_words:
-                candidate_text = clean_garbled_chars(word['text'])
-                # 首先尝试严格匹配（*项目名称*费用名称）
-                if PROJECT_NAME_REGEX.search(candidate_text):
-                    item_name = candidate_text.strip()
-                    break
-                # 如果严格匹配失败，尝试放宽条件：包含中文且不是纯数字
-                elif re.search(r'[\u4e00-\u9fa5]', candidate_text) and not re.match(r'^[\d\s\.]+$', candidate_text):
-                    # 检查是否可能是项目名称（长度合理，包含中文）
-                    if len(candidate_text.strip()) >= 2 and len(candidate_text.strip()) <= 100:
-                        item_name = candidate_text.strip()
-                        logger.debug(f'{pdf_path}: 使用放宽条件匹配到项目名称: {item_name[:50]}')
-                        break
-
-        # 创建明细项（即使没有项目名称，也可能有其他字段，需要保留用于合并）
-        item = LineItem()
-        item.item_name = item_name
-        item.spec = find_word_in_column('规格型号') or ''
-        item.unit = find_word_in_column('单位') or ''
-        item.quantity = find_word_in_column('数量') or ''
-        item.price = find_word_in_column('单价') or ''
-        item.amount = find_word_in_column('金额') or ''
-        item.tax_rate = find_word_in_column('税率') or ''
-        item.tax_amount = find_word_in_column('税额') or ''
-        
-        # 如果这一行有任何字段，就保留（可能是明细行的一部分）
-        if item.item_name or item.spec or item.unit or item.quantity or item.price or item.amount:
+        # 从当前行提取明细项
+        item = _extract_item_from_row(y, line_words, col_x_ranges, pdf_path)
+        if item:
             raw_items.append(item)
-            
-            # 打印明细数据行的x0坐标信息
-            logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
-            logger.debug(f'{pdf_path}: 明细数据行 (Y={y:.2f}) X坐标信息:')
-            for word in sorted_line_words:
-                word_text = clean_garbled_chars(word['text'])
-                # 判断该单词属于哪一列
-                matched_columns = []
-                for keyword, (col_x0, col_x1) in col_x_ranges.items():
-                    word_center = (word['x0'] + word['x1']) / 2
-                    if col_x0 <= word_center <= col_x1:
-                        matched_columns.append(keyword)
-                
-                column_info = f' -> [{", ".join(matched_columns)}]' if matched_columns else ' -> [未匹配到列]'
-                logger.debug(f'{pdf_path}:   单词: "{word_text:20s}" | x0={word["x0"]:8.2f} | x1={word["x1"]:8.2f} | 中心={((word["x0"]+word["x1"])/2):8.2f}{column_info}')
-
-            logger.debug(f'{pdf_path}: 解析结果: 项目名称="{item.item_name}", 金额="{item.amount}", 规格="{item.spec}", 单位="{item.unit}", 数量="{item.quantity}", 单价="{item.price}", 税率="{item.tax_rate}", 税额="{item.tax_amount}"')
-            logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
     
-    # 第二步：合并跨行的商品记录
+    # 合并跨行的商品记录
     items = merge_split_line_items(raw_items, col_x_starts, pdf_path)
 
     logger.info(f'{pdf_path}: 合并后共有 {len(items)} 条明细')
@@ -703,27 +893,50 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
                 if next_item.amount and next_item.amount.strip():
                     break
                 
-                # 检查是否是折行的字段（只有某个字段，没有其他字段）
-                has_only_spec = (next_item.spec and not next_item.item_name and not next_item.amount and 
-                                not next_item.unit and not next_item.quantity and not next_item.price)
-                has_only_item_name = (next_item.item_name and not next_item.spec and not next_item.amount and 
-                                     not next_item.unit and not next_item.quantity and not next_item.price)
+                # 检查是否是折行的字段（没有金额，但可能有其他单个字段）
+                has_no_amount = not next_item.amount or not next_item.amount.strip()
+                # 统计非空字段数量
+                field_count = sum([
+                    1 if next_item.item_name and next_item.item_name.strip() else 0,
+                    1 if next_item.spec and next_item.spec.strip() else 0,
+                    1 if next_item.unit and next_item.unit.strip() else 0,
+                    1 if next_item.quantity and next_item.quantity.strip() else 0,
+                    1 if next_item.price and next_item.price.strip() else 0,
+                    1 if next_item.tax_rate and next_item.tax_rate.strip() else 0,
+                    1 if next_item.tax_amount and next_item.tax_amount.strip() else 0,
+                ])
                 
-                if has_only_spec:
-                    # 合并规格
-                    if merged_item.spec:
-                        merged_item.spec = f'{merged_item.spec} {next_item.spec}'.strip()
-                    else:
-                        merged_item.spec = next_item.spec
-                    logger.debug(f'{pdf_path}: 合并规格字段: 行{i} + 行{j}, 规格="{merged_item.spec}"')
-                    j += 1
-                elif has_only_item_name:
-                    # 合并项目名称（项目名称折行）
-                    if merged_item.item_name:
-                        merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip()
-                    else:
-                        merged_item.item_name = next_item.item_name
-                    logger.debug(f'{pdf_path}: 合并项目名称字段: 行{i} + 行{j}, 项目名称="{merged_item.item_name}"')
+                # 如果只有1-2个字段且没有金额，可能是折行字段
+                is_continuation = has_no_amount and field_count <= 2
+                
+                if is_continuation:
+                    # 合并所有字段（折行情况）
+                    if next_item.item_name and next_item.item_name.strip():
+                        if merged_item.item_name:
+                            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
+                        else:
+                            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
+                    if next_item.spec and next_item.spec.strip():
+                        if merged_item.spec:
+                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
+                        else:
+                            merged_item.spec = next_item.spec.strip().replace(' ', '')
+                    if next_item.price and next_item.price.strip():
+                        if not merged_item.price or not merged_item.price.strip():
+                            merged_item.price = next_item.price.strip().replace(' ', '')
+                    if next_item.quantity and next_item.quantity.strip():
+                        if not merged_item.quantity or not merged_item.quantity.strip():
+                            merged_item.quantity = next_item.quantity.strip().replace(' ', '')
+                    if next_item.unit and next_item.unit.strip():
+                        if not merged_item.unit or not merged_item.unit.strip():
+                            merged_item.unit = next_item.unit.strip().replace(' ', '')
+                    if next_item.tax_rate and next_item.tax_rate.strip():
+                        if not merged_item.tax_rate or not merged_item.tax_rate.strip():
+                            merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
+                    if next_item.tax_amount and next_item.tax_amount.strip():
+                        if not merged_item.tax_amount or not merged_item.tax_amount.strip():
+                            merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
+                    logger.debug(f'{pdf_path}: 合并折行字段: 行{i} + 行{j}, 项目名称="{merged_item.item_name[:30]}", 规格="{merged_item.spec}", 单价="{merged_item.price}"')
                     j += 1
                 else:
                     break
@@ -746,38 +959,68 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
                 k = j + 1
                 while k < len(items) and k < j + 4:
                     more_item = items[k]
-                    # 如果下一行有金额，说明是新的商品，停止合并
+                    # 如果下一行有金额，说明是新的商品，停止当前商品的合并
                     if more_item.amount and more_item.amount.strip():
+                        logger.debug(f'{pdf_path}: 行{k}有金额，停止当前商品合并')
                         break
                     
-                    # 检查是否是折行的字段
-                    has_only_spec = (more_item.spec and not more_item.item_name and not more_item.amount and
-                                    not more_item.unit and not more_item.quantity and not more_item.price)
-                    has_only_item_name = (more_item.item_name and not more_item.spec and not more_item.amount and
-                                         not more_item.unit and not more_item.quantity and not more_item.price)
+                    # 检查是否是折行的字段（没有金额，但可能有其他单个字段）
+                    has_no_amount = not more_item.amount or not more_item.amount.strip()
+                    # 统计非空字段数量
+                    field_count = sum([
+                        1 if more_item.item_name and more_item.item_name.strip() else 0,
+                        1 if more_item.spec and more_item.spec.strip() else 0,
+                        1 if more_item.unit and more_item.unit.strip() else 0,
+                        1 if more_item.quantity and more_item.quantity.strip() else 0,
+                        1 if more_item.price and more_item.price.strip() else 0,
+                        1 if more_item.tax_rate and more_item.tax_rate.strip() else 0,
+                        1 if more_item.tax_amount and more_item.tax_amount.strip() else 0,
+                    ])
                     
-                    if has_only_spec:
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec} {more_item.spec}'.strip()
-                        else:
-                            merged_item.spec = more_item.spec
-                        logger.debug(f'{pdf_path}: 合并规格字段: 行{i}+行{j} + 行{k}, 规格="{merged_item.spec}"')
-                        k += 1
-                    elif has_only_item_name:
-                        # 合并项目名称（项目名称折行）
-                        if merged_item.item_name:
-                            merged_item.item_name = f'{merged_item.item_name}{more_item.item_name}'.strip()
-                        else:
-                            merged_item.item_name = more_item.item_name
-                        logger.debug(f'{pdf_path}: 合并项目名称字段: 行{i}+行{j} + 行{k}, 项目名称="{merged_item.item_name}"')
+                    # 如果只有1-2个字段且没有金额，可能是折行字段
+                    is_continuation = has_no_amount and field_count <= 2
+                    
+                    logger.debug(f'{pdf_path}: 检查行{k}合并条件: 项目名称="{more_item.item_name}", 规格="{more_item.spec}", 单价="{more_item.price}", has_no_amount={has_no_amount}, field_count={field_count}, is_continuation={is_continuation}')
+                    
+                    if is_continuation:
+                        # 合并所有字段（折行情况）
+                        if more_item.item_name and more_item.item_name.strip():
+                            if merged_item.item_name:
+                                merged_item.item_name = f'{merged_item.item_name}{more_item.item_name}'.strip().replace(' ', '')
+                            else:
+                                merged_item.item_name = more_item.item_name.strip().replace(' ', '')
+                        if more_item.spec and more_item.spec.strip():
+                            if merged_item.spec:
+                                merged_item.spec = f'{merged_item.spec}{more_item.spec}'.strip().replace(' ', '')
+                            else:
+                                merged_item.spec = more_item.spec.strip().replace(' ', '')
+                        if more_item.price and more_item.price.strip():
+                            if not merged_item.price or not merged_item.price.strip():
+                                merged_item.price = more_item.price.strip().replace(' ', '')
+                        if more_item.quantity and more_item.quantity.strip():
+                            if not merged_item.quantity or not merged_item.quantity.strip():
+                                merged_item.quantity = more_item.quantity.strip().replace(' ', '')
+                        if more_item.unit and more_item.unit.strip():
+                            if not merged_item.unit or not merged_item.unit.strip():
+                                merged_item.unit = more_item.unit.strip().replace(' ', '')
+                        if more_item.tax_rate and more_item.tax_rate.strip():
+                            if not merged_item.tax_rate or not merged_item.tax_rate.strip():
+                                merged_item.tax_rate = more_item.tax_rate.strip().replace(' ', '')
+                        if more_item.tax_amount and more_item.tax_amount.strip():
+                            if not merged_item.tax_amount or not merged_item.tax_amount.strip():
+                                merged_item.tax_amount = more_item.tax_amount.strip().replace(' ', '')
+                        logger.debug(f'{pdf_path}: 合并折行字段: 行{i}+行{j} + 行{k}, 项目名称="{merged_item.item_name[:30]}", 规格="{merged_item.spec}", 单价="{merged_item.price}"')
                         k += 1
                     else:
                         break
                 
                 merged_items.append(merged_item)
-                i = k  # 跳过已合并的记录
+                # 设置i为k，继续处理下一个商品（k可能是下一个有金额的记录，或者已经处理完所有折行字段）
+                start_row = i
+                end_row = k - 1
+                i = k
                 merged = True
-                logger.debug(f'{pdf_path}: 合并记录 行{i-k+j} 到 行{k-1}: 项目名称="{merged_item.item_name[:30]}", 金额="{merged_item.amount}"')
+                logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:30]}", 金额="{merged_item.amount}"')
                 break
         
         if not merged:
@@ -785,6 +1028,25 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
             if current_item.item_name:
                 merged_items.append(current_item)
             i += 1
+    
+    # 合并完成后，去掉所有字段中的空格
+    for item in merged_items:
+        if item.item_name:
+            item.item_name = item.item_name.replace(' ', '')
+        if item.spec:
+            item.spec = item.spec.replace(' ', '')
+        if item.unit:
+            item.unit = item.unit.replace(' ', '')
+        if item.quantity:
+            item.quantity = item.quantity.replace(' ', '')
+        if item.price:
+            item.price = item.price.replace(' ', '')
+        if item.amount:
+            item.amount = item.amount.replace(' ', '')
+        if item.tax_rate:
+            item.tax_rate = item.tax_rate.replace(' ', '')
+        if item.tax_amount:
+            item.tax_amount = item.tax_amount.replace(' ', '')
     
     return merged_items
 
@@ -848,14 +1110,14 @@ def merge_two_items(item1: LineItem, item2: LineItem) -> LineItem:
     # 项目名称：优先使用 item1 的（通常是第一行）
     merged.item_name = item1.item_name or item2.item_name
     
-    # 规格型号：合并两个记录的规格（可能是折行显示）
+    # 规格型号：合并两个记录的规格（可能是折行显示，去掉空格）
     spec1 = (item1.spec or '').strip()
     spec2 = (item2.spec or '').strip()
     if spec1 and spec2:
-        # 如果两个都有规格，合并（可能是折行）
-        merged.spec = f'{spec1} {spec2}'.strip()
+        # 如果两个都有规格，合并（可能是折行），去掉空格
+        merged.spec = f'{spec1}{spec2}'.strip().replace(' ', '')
     else:
-        merged.spec = spec1 or spec2
+        merged.spec = (spec1 or spec2).strip().replace(' ', '')
     
     # 其他字段：优先使用有值的字段
     merged.unit = item1.unit or item2.unit

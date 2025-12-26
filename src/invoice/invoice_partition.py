@@ -1021,96 +1021,6 @@ def split_buyer_seller(
     
     return buyer_words, seller_words
 
-
-def _log_all_lines_info(all_lines: List[dict], page_width: float, table_bottom_boundary: Optional[float]):
-    """
-    打印所有线条的详细信息（用于调试）
-    
-    Args:
-        all_lines: 所有线条列表
-        page_width: 页面宽度
-        table_bottom_boundary: 表格底部边界Y坐标
-    """
-    logger.debug("\n" + "="*80)
-    logger.debug("线条坐标信息（所有线条）")
-    logger.debug("="*80)
-    logger.debug(f"{'序号':<6} {'类型':<10} {'X0':<10} {'X1':<10} {'Y0':<10} {'Y1':<10} {'宽度':<10} {'高度':<10} {'长度':<10} {'过滤原因':<15}")
-    logger.debug("-" * 120)
-    
-    for i, line in enumerate(all_lines):
-        line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
-        x0 = line.get('x0', 0)
-        x1 = line.get('x1', 0)
-        y0 = line.get('y0', 0)
-        y1 = line.get('y1', 0)
-        width = abs(x1 - x0)
-        height = abs(y1 - y0)
-        length = max(width, height)
-        
-        # 分析为什么被过滤
-        filter_reason = ""
-        if line_type == "水平":
-            line_length = math.sqrt((x1 - x0)**2 + (y1 - y0)**2)
-            if line_length < page_width * 0.3:
-                filter_reason = "太短"
-            elif width < page_width * 0.7:
-                filter_reason = f"宽度不足({width/page_width*100:.1f}%)"
-            color = line.get('stroking_color')
-            if color and len(color) == 3:
-                if color[0] > 0.6 and color[1] < 0.4 and color[2] < 0.4:
-                    filter_reason = "红色(印章)"
-            if table_bottom_boundary and y0 >= table_bottom_boundary - 10:
-                filter_reason = "底部边界"
-        else:
-            line_length = math.sqrt((x1 - x0)**2 + (y1 - y0)**2)
-            if line_length < page_width * 0.3:
-                filter_reason = "太短"
-        
-        logger.debug(f"{i+1:<6} {line_type:<10} {x0:<10.2f} {x1:<10.2f} {y0:<10.2f} {y1:<10.2f} {width:<10.2f} {height:<10.2f} {length:<10.2f} {filter_reason:<15}")
-    
-    logger.debug("="*80 + "\n")
-
-
-def _log_filtered_lines(lines: List[dict]):
-    """
-    打印过滤后的线条信息（用于调试）
-    
-    Args:
-        lines: 过滤后的线条列表
-    """
-    if lines:
-        logger.debug("\n过滤后的线条坐标信息:")
-        for i, line in enumerate(lines):
-            line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
-            logger.debug(f"  线条{i+1} ({line_type}): X=[{line['x0']:.2f}, {line['x1']:.2f}], Y=[{line['y0']:.2f}, {line['y1']:.2f}], "
-                        f"宽度={abs(line['x1']-line['x0']):.2f}, 高度={abs(line['y1']-line['y0']):.2f}")
-
-
-def _log_word_lines_grouping(lines_dict: dict):
-    """
-    打印单词按行分组的信息（用于调试）
-    
-    Args:
-        lines_dict: 按Y坐标分组的单词字典
-    """
-    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0], reverse=False)
-    
-    logger.debug("\n单词按行分组（用于分析区域边界）")
-    logger.debug("="*80)
-    logger.debug(f"{'行号':<6} {'Y坐标':<12} {'单词数':<8} {'文字内容'}")
-    logger.debug("-" * 100)
-    
-    for line_num, (y_coord, line_words) in enumerate(sorted_lines, 1):
-        sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
-        line_text = ' '.join([w['text'] for w in sorted_line_words])
-        if len(line_text) > 80:
-            line_text = line_text[:77] + "..."
-        logger.debug(f"{line_num:<6} {y_coord:<12.2f} {len(line_words):<8} {line_text}")
-    
-    logger.debug("="*80)
-    logger.debug(f"总共 {len(sorted_lines)} 行\n")
-
-
 def reconstruct_text_from_words(words: List[dict]) -> str:
     """
     从单词列表重建文本（按Y-X排序）
@@ -1174,20 +1084,9 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     all_lines = page.lines
     logger.debug(f'页面中共有 {len(all_lines)} 条线条')
     
-    # 识别表格底部边界（用于分析过滤原因）
-    table_bottom_boundary = None
-    if words:
-        table_bottom_boundary = find_table_bottom_boundary(words)
-    
-    # 打印所有线条的坐标信息（用于调试）
-    _log_all_lines_info(all_lines, page_width, table_bottom_boundary)
-    
     # 过滤无关线条（排除底部线条）
     lines = filter_relevant_lines(all_lines, page_width, words)
     logger.debug(f'过滤后剩余 {len(lines)} 条相关线条（已排除底部价税合计/备注等行的分割线）')
-    
-    # 打印过滤后的线条信息
-    _log_filtered_lines(lines)
     
     # ========== 新逻辑：分层分区 ==========
     logger.debug("\n" + "="*80)
@@ -1202,8 +1101,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     
     # 步骤2：将单词按行分组
     lines_dict = group_words_by_y(words, y_tolerance=3.0)
-    _log_word_lines_grouping(lines_dict)
-    
+
     # 步骤3：从分组数据中删除底部内容（价税合计、备注等）
     filtered_lines_dict = filter_bottom_lines_from_grouped_data(
         lines_dict, table_bottom_y, table_bottom_line_y
