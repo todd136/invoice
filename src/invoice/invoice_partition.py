@@ -217,6 +217,231 @@ def filter_bottom_lines_from_grouped_data(
     """
     从分组数据中删除底部内容（价税合计、备注等）
     
+    支持多页发票合并在一页的情况：
+    1. 识别所有"项目名称"行（表头行）
+    2. 识别所有小计行（包含"¥"或"小计"关键词）
+    3. 保留所有明细数据（从每个"项目名称"行到对应的小计行之间）
+    4. 过滤所有小计行及其之后到下一个"项目名称"行之间的内容
+    5. 过滤最后一个小计行之后的所有内容
+    
+    Args:
+        lines_dict: 按Y坐标分组的单词字典
+        table_bottom_y: 表格底部关键词Y坐标（保留用于兼容单页发票）
+        table_bottom_line_y: 表格底部水平线Y坐标（保留用于兼容单页发票）
+    
+    Returns:
+        过滤后的分组数据
+    """
+    if not lines_dict:
+        return {}
+    
+    # 按Y坐标排序所有行
+    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
+    
+    # 1. 识别所有"项目名称"行（表头行）
+    project_name_lines = []  # [(y, line_words), ...]
+    for y, line_words in sorted_lines:
+        line_text = ' '.join([w['text'] for w in line_words])
+        # 检查是否包含"项目名称"关键词，通常还包含其他表头关键词
+        if '项目名称' in line_text:
+            # 进一步验证：通常表头行还包含其他关键词
+            table_header_keywords = ['规格型号', '单位', '数量', '单价', '金额', '税率', '税额']
+            keyword_count = sum(1 for kw in table_header_keywords if kw in line_text)
+            if keyword_count >= 2:  # 至少包含2个表头关键词，确认为表头行
+                project_name_lines.append((y, line_words))
+    
+    # 2. 识别所有包含"¥"的行
+    yuan_lines = []  # [(y, line_words), ...]
+    for y, line_words in sorted_lines:
+        line_text = ' '.join([w['text'] for w in line_words])
+        if '¥' in line_text:
+            yuan_lines.append((y, line_words))
+    
+    # 3. 识别所有包含"小计"的行（去掉空格后）
+    xiaoji_lines = []  # [(y, line_words), ...]
+    for y, line_words in sorted_lines:
+        line_text = ' '.join([w['text'] for w in line_words])
+        line_text_no_space = line_text.replace(' ', '')
+        if '小计' in line_text_no_space:
+            xiaoji_lines.append((y, line_words))
+    
+    # 3.1 识别所有包含"合计"的行（去掉空格后，用于单页发票）
+    heji_lines = []  # [(y, line_words), ...]
+    for y, line_words in sorted_lines:
+        line_text = ' '.join([w['text'] for w in line_words])
+        line_text_no_space = line_text.replace(' ', '')
+        if '合计' in line_text_no_space:
+            heji_lines.append((y, line_words))
+    
+    logger.debug(f'识别到 {len(project_name_lines)} 个"项目名称"行（表头行）')
+    logger.debug(f'识别到 {len(yuan_lines)} 个包含"¥"的行')
+    logger.debug(f'识别到 {len(xiaoji_lines)} 个包含"小计"的行')
+    logger.debug(f'识别到 {len(heji_lines)} 个包含"合计"的行')
+    
+    # 如果没有找到"项目名称"行，使用原有逻辑（兼容单页发票）
+    if not project_name_lines:
+        logger.debug('未找到"项目名称"行，使用原有过滤逻辑（兼容单页发票）')
+        return _filter_bottom_lines_legacy(lines_dict, table_bottom_y, table_bottom_line_y)
+    
+    # 判断是否为单页发票：只有一个"项目名称"行，且没有"小计"行
+    is_single_page = len(project_name_lines) == 1 and len(xiaoji_lines) == 0
+    
+    # 4. 合并小计行标识（包含"¥"或"小计"的行，单页发票也识别"合计"行）
+    # 对于每个小计，找到包含"¥"和"小计"的行，取Y坐标较小的作为小计起始行
+    xiaoji_start_lines = []  # [(y, line_words), ...]
+    
+    # 4.1 对于每个包含"小计"的行，检查它附近是否有包含"¥"的行
+    for xj_y, xj_line_words in xiaoji_lines:
+        xj_line_text = ' '.join([w['text'] for w in xj_line_words])
+        xj_line_text_no_space = xj_line_text.replace(' ', '')
+        
+        # 如果这一行同时包含"¥"，直接使用
+        if '¥' in xj_line_text:
+            xiaoji_start_lines.append((xj_y, xj_line_words))
+        else:
+            # 如果这一行不包含"¥"，查找附近包含"¥"的行
+            # 查找Y坐标最接近的包含"¥"的行（在同一行或相邻行）
+            nearest_yuan_y = None
+            min_distance = float('inf')
+            for yuan_y, _ in yuan_lines:
+                distance = abs(yuan_y - xj_y)
+                if distance < min_distance and distance <= 10.0:  # 容差10像素
+                    min_distance = distance
+                    nearest_yuan_y = yuan_y
+            
+            if nearest_yuan_y is not None:
+                # 使用Y坐标较小的作为小计起始行
+                start_y = min(xj_y, nearest_yuan_y)
+                # 找到对应的行
+                for y, line_words in sorted_lines:
+                    if abs(y - start_y) < 1.0:
+                        xiaoji_start_lines.append((y, line_words))
+                        break
+            else:
+                # 如果找不到包含"¥"的行，使用包含"小计"的行
+                xiaoji_start_lines.append((xj_y, xj_line_words))
+    
+    # 4.2 对于单页发票，识别"合计"行（包含"合计"和"¥"）作为过滤起点
+    if is_single_page:
+        logger.debug('检测到单页发票（只有一个表头且没有"小计"），识别"合计"行作为过滤起点')
+        for hj_y, hj_line_words in heji_lines:
+            hj_line_text = ' '.join([w['text'] for w in hj_line_words])
+            hj_line_text_no_space = hj_line_text.replace(' ', '')
+            
+            # 如果这一行同时包含"¥"，直接使用
+            if '¥' in hj_line_text:
+                # 检查是否已经包含在小计起始行中
+                already_included = any(abs(hj_y - xj_y) < 1.0 for xj_y, _ in xiaoji_start_lines)
+                if not already_included:
+                    xiaoji_start_lines.append((hj_y, hj_line_words))
+            else:
+                # 如果这一行不包含"¥"，查找附近包含"¥"的行
+                nearest_yuan_y = None
+                min_distance = float('inf')
+                for yuan_y, _ in yuan_lines:
+                    distance = abs(yuan_y - hj_y)
+                    if distance < min_distance and distance <= 10.0:  # 容差10像素
+                        min_distance = distance
+                        nearest_yuan_y = yuan_y
+                
+                if nearest_yuan_y is not None:
+                    # 使用Y坐标较小的作为小计起始行
+                    start_y = min(hj_y, nearest_yuan_y)
+                    # 检查是否已经包含
+                    already_included = any(abs(start_y - xj_y) < 1.0 for xj_y, _ in xiaoji_start_lines)
+                    if not already_included:
+                        # 找到对应的行
+                        for y, line_words in sorted_lines:
+                            if abs(y - start_y) < 1.0:
+                                xiaoji_start_lines.append((y, line_words))
+                                break
+    
+    # 4.3 对于只包含"¥"但不包含"小计"的行，如果它在某个"小计"行或"合计"行附近，也加入
+    for yuan_y, yuan_line_words in yuan_lines:
+        yuan_line_text = ' '.join([w['text'] for w in yuan_line_words])
+        # 检查是否已经包含在小计起始行中
+        already_included = any(abs(yuan_y - xj_y) < 1.0 for xj_y, _ in xiaoji_start_lines)
+        if not already_included:
+            # 检查是否在某个"小计"行附近
+            near_xiaoji = any(abs(yuan_y - xj_y) <= 10.0 for xj_y, _ in xiaoji_lines)
+            # 对于单页发票，也检查是否在某个"合计"行附近
+            near_heji = is_single_page and any(abs(yuan_y - hj_y) <= 10.0 for hj_y, _ in heji_lines)
+            if near_xiaoji or near_heji:
+                xiaoji_start_lines.append((yuan_y, yuan_line_words))
+    
+    # 去重并排序（按Y坐标去重）
+    seen_y = set()
+    unique_xiaoji_start_lines = []
+    for y, line_words in sorted(xiaoji_start_lines, key=lambda x: x[0]):
+        if y not in seen_y:
+            seen_y.add(y)
+            unique_xiaoji_start_lines.append((y, line_words))
+    xiaoji_start_lines = unique_xiaoji_start_lines
+    
+    logger.debug(f'合并后识别到 {len(xiaoji_start_lines)} 个小计起始行')
+    
+    # 5. 确定需要过滤的行
+    lines_to_filter = set()
+    
+    # 5.1 过滤掉第二个及后续的"项目名称"行（表头行），只保留第一个
+    if len(project_name_lines) > 1:
+        for i in range(1, len(project_name_lines)):
+            pn_y = project_name_lines[i][0]
+            lines_to_filter.add(pn_y)
+            logger.debug(f'过滤第 {i+1} 个"项目名称"行（表头行），Y={pn_y:.2f}')
+    
+    # 5.2 对于每个"项目名称"行，过滤从小计行到下一个"项目名称"行之间的内容
+    for i, (pn_y, _) in enumerate(project_name_lines):
+        # 找到这个"项目名称"行之后的小计起始行
+        xiaoji_after_pn = [xj_y for xj_y, _ in xiaoji_start_lines if xj_y > pn_y]
+        if not xiaoji_after_pn:
+            # 如果没有找到小计行，说明这是最后一个表头，保留之后的所有明细数据
+            # 但需要检查是否有其他过滤条件
+            continue
+        
+        # 找到最近的小计起始行
+        nearest_xiaoji_y = min(xiaoji_after_pn)
+        
+        # 找到下一个"项目名称"行（如果有）
+        next_pn_y = None
+        if i + 1 < len(project_name_lines):
+            next_pn_y = project_name_lines[i + 1][0]
+        
+        # 确定过滤范围：从最近的小计起始行开始，到下一个"项目名称"行之前（如果有）
+        filter_start_y = nearest_xiaoji_y
+        filter_end_y = next_pn_y if next_pn_y else float('inf')
+        
+        # 标记需要过滤的行
+        for y, _ in sorted_lines:
+            if filter_start_y <= y < filter_end_y:
+                lines_to_filter.add(y)
+    
+    # 6. 过滤最后一个小计行之后的所有内容
+    if xiaoji_start_lines:
+        last_xiaoji_y = xiaoji_start_lines[-1][0]
+        for y, _ in sorted_lines:
+            if y > last_xiaoji_y:
+                lines_to_filter.add(y)
+    
+    logger.debug(f'标记了 {len(lines_to_filter)} 行需要过滤')
+    
+    # 7. 构建过滤后的结果
+    filtered_lines_dict = {}
+    for y, line_words in lines_dict.items():
+        if y not in lines_to_filter:
+            filtered_lines_dict[y] = line_words
+    
+    return filtered_lines_dict
+
+
+def _filter_bottom_lines_legacy(
+    lines_dict: dict,
+    table_bottom_y: Optional[float],
+    table_bottom_line_y: Optional[float]
+) -> dict:
+    """
+    原有的过滤逻辑（用于兼容单页发票）
+    
     Args:
         lines_dict: 按Y坐标分组的单词字典
         table_bottom_y: 表格底部关键词Y坐标
@@ -1021,6 +1246,96 @@ def split_buyer_seller(
     
     return buyer_words, seller_words
 
+
+def _log_all_lines_info(all_lines: List[dict], page_width: float, table_bottom_boundary: Optional[float]):
+    """
+    打印所有线条的详细信息（用于调试）
+
+    Args:
+        all_lines: 所有线条列表
+        page_width: 页面宽度
+        table_bottom_boundary: 表格底部边界Y坐标
+    """
+    logger.debug("\n" + "="*80)
+    logger.debug("线条坐标信息（所有线条）")
+    logger.debug("="*80)
+    logger.debug(f"{'序号':<6} {'类型':<10} {'X0':<10} {'X1':<10} {'Y0':<10} {'Y1':<10} {'宽度':<10} {'高度':<10} {'长度':<10} {'过滤原因':<15}")
+    logger.debug("-" * 120)
+
+    for i, line in enumerate(all_lines):
+        line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
+        x0 = line.get('x0', 0)
+        x1 = line.get('x1', 0)
+        y0 = line.get('y0', 0)
+        y1 = line.get('y1', 0)
+        width = abs(x1 - x0)
+        height = abs(y1 - y0)
+        length = max(width, height)
+
+        # 分析为什么被过滤
+        filter_reason = ""
+        if line_type == "水平":
+            line_length = math.sqrt((x1 - x0)**2 + (y1 - y0)**2)
+            if line_length < page_width * 0.3:
+                filter_reason = "太短"
+            elif width < page_width * 0.7:
+                filter_reason = f"宽度不足({width/page_width*100:.1f}%)"
+            color = line.get('stroking_color')
+            if color and len(color) == 3:
+                if color[0] > 0.6 and color[1] < 0.4 and color[2] < 0.4:
+                    filter_reason = "红色(印章)"
+            if table_bottom_boundary and y0 >= table_bottom_boundary - 10:
+                filter_reason = "底部边界"
+        else:
+            line_length = math.sqrt((x1 - x0)**2 + (y1 - y0)**2)
+            if line_length < page_width * 0.3:
+                filter_reason = "太短"
+
+        logger.debug(f"{i+1:<6} {line_type:<10} {x0:<10.2f} {x1:<10.2f} {y0:<10.2f} {y1:<10.2f} {width:<10.2f} {height:<10.2f} {length:<10.2f} {filter_reason:<15}")
+
+    logger.debug("="*80 + "\n")
+
+
+def _log_filtered_lines(lines: List[dict]):
+    """
+    打印过滤后的线条信息（用于调试）
+
+    Args:
+        lines: 过滤后的线条列表
+    """
+    if lines:
+        logger.debug("\n过滤后的线条坐标信息:")
+        for i, line in enumerate(lines):
+            line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
+            logger.debug(f"  线条{i+1} ({line_type}): X=[{line['x0']:.2f}, {line['x1']:.2f}], Y=[{line['y0']:.2f}, {line['y1']:.2f}], "
+                        f"宽度={abs(line['x1']-line['x0']):.2f}, 高度={abs(line['y1']-line['y0']):.2f}")
+
+
+def _log_word_lines_grouping(lines_dict: dict):
+    """
+    打印单词按行分组的信息（用于调试）
+
+    Args:
+        lines_dict: 按Y坐标分组的单词字典
+    """
+    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0], reverse=False)
+
+    logger.debug("\n单词按行分组（用于分析区域边界）")
+    logger.debug("="*80)
+    logger.debug(f"{'行号':<6} {'Y坐标':<12} {'单词数':<8} {'文字内容'}")
+    logger.debug("-" * 100)
+
+    for line_num, (y_coord, line_words) in enumerate(sorted_lines, 1):
+        sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
+        line_text = ' '.join([w['text'] for w in sorted_line_words])
+        if len(line_text) > 80:
+            line_text = line_text[:77] + "..."
+        logger.debug(f"{line_num:<6} {y_coord:<12.2f} {len(line_words):<8} {line_text}")
+
+    logger.debug("="*80)
+    logger.debug(f"总共 {len(sorted_lines)} 行\n")
+
+
 def reconstruct_text_from_words(words: List[dict]) -> str:
     """
     从单词列表重建文本（按Y-X排序）
@@ -1084,10 +1399,21 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     all_lines = page.lines
     logger.debug(f'页面中共有 {len(all_lines)} 条线条')
     
+    # 识别表格底部边界（用于分析过滤原因）
+    table_bottom_boundary = None
+    if words:
+        table_bottom_boundary = find_table_bottom_boundary(words)
+
+    # 打印所有线条的坐标信息（用于调试）
+    _log_all_lines_info(all_lines, page_width, table_bottom_boundary)
+
     # 过滤无关线条（排除底部线条）
     lines = filter_relevant_lines(all_lines, page_width, words)
     logger.debug(f'过滤后剩余 {len(lines)} 条相关线条（已排除底部价税合计/备注等行的分割线）')
     
+    # 打印过滤后的线条信息
+    _log_filtered_lines(lines)
+
     # ========== 新逻辑：分层分区 ==========
     logger.debug("\n" + "="*80)
     logger.debug("开始分层分区逻辑")
@@ -1101,6 +1427,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     
     # 步骤2：将单词按行分组
     lines_dict = group_words_by_y(words, y_tolerance=3.0)
+    _log_word_lines_grouping(lines_dict)
 
     # 步骤3：从分组数据中删除底部内容（价税合计、备注等）
     filtered_lines_dict = filter_bottom_lines_from_grouped_data(

@@ -54,7 +54,7 @@ class InvoiceProcessor:
         # 2. 循环处理每张发票
         invoice_list = []
         for invoice_file in invoice_file_list:
-            invoice = self.process_single(invoice_file)
+            invoice = self.process_single(invoice_file, True)
             if invoice:
                 invoice_list.append(invoice)
         
