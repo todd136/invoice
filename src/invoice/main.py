@@ -26,6 +26,10 @@ def get_executable_dir():
     # sys.executable 在打包后指向可执行文件路径，在开发环境指向 Python 解释器路径
     # 获取其父目录即可得到可执行文件所在目录
     executable_path = Path(sys.executable)
+    print("executable path = " + str(executable_path))
+
+    executable_path = Path(sys.argv[0])
+    print("argv[0] path = " + str(executable_path))
     return executable_path.parent.absolute()
 
 
