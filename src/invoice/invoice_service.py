@@ -1181,38 +1181,40 @@ def _merge_fields_from_item(merged_item: LineItem, next_item: LineItem, merge_sp
         merge_spec: 是否合并规格型号（True表示拼接，False表示互补）
     """
     # 项目名称：拼接
-                    if next_item.item_name and next_item.item_name.strip():
-                        if merged_item.item_name:
-                            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
-                        else:
-                            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
+    if next_item.item_name and next_item.item_name.strip():
+        if merged_item.item_name:
+            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
+        else:
+            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
     
     # 规格型号：根据merge_spec决定是拼接还是互补
-                    if next_item.spec and next_item.spec.strip():
+    if next_item.spec and next_item.spec.strip():
         if merge_spec:
             # 拼接模式（用于折行）
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                        else:
+            if merged_item.spec:
+                merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
+            else:
+                merged_item.spec = next_item.spec.strip().replace(' ', '')
+        else:
             # 互补模式（仅在merged_item没有时才设置）
             if not merged_item.spec:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
+                merged_item.spec = next_item.spec.strip().replace(' ', '')
     
     # 其他字段：互补模式（仅在merged_item没有时才设置）
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                        merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.amount and next_item.amount.strip() and not merged_item.amount:
-                        merged_item.amount = next_item.amount.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
+    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
+        merged_item.unit = next_item.unit.strip().replace(' ', '')
+    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
+        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
+    if next_item.price and next_item.price.strip() and not merged_item.price:
+        merged_item.price = next_item.price.strip().replace(' ', '')
+    if next_item.amount and next_item.amount.strip() and not merged_item.amount:
+        merged_item.amount = next_item.amount.strip().replace(' ', '')
+    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
+        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
+    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
+        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
+
+
 
 
 def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: List[LineItem], pdf_path: str = '') -> int:
