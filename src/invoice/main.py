@@ -25,11 +25,8 @@ def get_executable_dir():
     """
     # sys.executable 在打包后指向可执行文件路径，在开发环境指向 Python 解释器路径
     # 获取其父目录即可得到可执行文件所在目录
-    executable_path = Path(sys.executable)
-    print("executable path = " + str(executable_path))
-
     executable_path = Path(sys.argv[0])
-    print("argv[0] path = " + str(executable_path))
+    logging.info("开始处理发票，路径 = " + str(executable_path))
     return executable_path.parent.absolute()
 
 
@@ -57,14 +54,6 @@ def main():
     invoice_list = processor.process_batch()
 
     logging.info('程序处理完成，即将退出...')
-    
-    # 等待用户按键退出（适用于打包后的可执行文件）
-    print('\n程序执行完成，按回车键退出...')
-    try:
-        input()
-    except (EOFError, KeyboardInterrupt):
-        # 处理可能的输入错误（如重定向输入时）
-        pass
 
 
 if __name__ == '__main__':
