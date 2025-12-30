@@ -1171,6 +1171,147 @@ def _is_generic_continuation_line(item: LineItem) -> bool:
     return field_count <= 2
 
 
+def _merge_fields_from_item(merged_item: LineItem, next_item: LineItem, merge_spec: bool = True) -> None:
+    """
+    将next_item的字段合并到merged_item中
+    
+    Args:
+        merged_item: 目标合并项
+        next_item: 源项
+        merge_spec: 是否合并规格型号（True表示拼接，False表示互补）
+    """
+    # 项目名称：拼接
+                    if next_item.item_name and next_item.item_name.strip():
+                        if merged_item.item_name:
+                            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
+                        else:
+                            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
+    
+    # 规格型号：根据merge_spec决定是拼接还是互补
+                    if next_item.spec and next_item.spec.strip():
+        if merge_spec:
+            # 拼接模式（用于折行）
+                        if merged_item.spec:
+                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
+                        else:
+                            merged_item.spec = next_item.spec.strip().replace(' ', '')
+                        else:
+            # 互补模式（仅在merged_item没有时才设置）
+            if not merged_item.spec:
+                            merged_item.spec = next_item.spec.strip().replace(' ', '')
+    
+    # 其他字段：互补模式（仅在merged_item没有时才设置）
+                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
+                        merged_item.unit = next_item.unit.strip().replace(' ', '')
+                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
+                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
+                    if next_item.price and next_item.price.strip() and not merged_item.price:
+                        merged_item.price = next_item.price.strip().replace(' ', '')
+                    if next_item.amount and next_item.amount.strip() and not merged_item.amount:
+                        merged_item.amount = next_item.amount.strip().replace(' ', '')
+                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
+                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
+                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
+                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
+
+
+def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: List[LineItem], pdf_path: str = '') -> int:
+    """
+    统一的合并循环逻辑：从start_index开始向后扫描，合并跨行和折行的记录
+    
+    使用统一的检查顺序（情况1的逻辑）：
+    1. 遇到新的项目名称首行 → 停止
+    2. 遇到有金额的行：
+       - 如果merged_item无金额 → 合并，继续
+       - 如果merged_item已有金额 → 停止
+    3. 项目名称跨行 → 合并
+    4. 规格型号折行 → 合并
+    5. 单个字段行 → 合并
+    6. 通用折行 → 合并
+    7. 互补字段合并 → 合并
+    8. 其他情况 → 停止
+    
+    Args:
+        merged_item: 当前正在合并的商品项
+        start_index: 开始扫描的位置（从start_index+1开始）
+        items: 所有商品明细列表
+        pdf_path: PDF 文件路径（用于日志）
+        
+    Returns:
+        合并结束的位置（下一个要处理的索引）
+    """
+    j = start_index + 1
+            while j < len(items):
+                next_item = items[j]
+                
+        # 1. 遇到新的项目名称首行，停止合并
+        if _is_item_name_first_line(next_item):
+            logger.debug(f'{pdf_path}: 行{j}是新的项目名称首行，停止当前商品合并')
+                    break
+                
+        # 2. 如果下一行有金额，但不是新的项目名称首行
+        if next_item.amount and next_item.amount.strip():
+            # 如果当前合并项还没有金额，合并这一行
+            if not merged_item.amount or not merged_item.amount.strip():
+                # 合并金额和其他字段（金额行需要合并规格型号）
+                if next_item.amount and next_item.amount.strip():
+                    merged_item.amount = next_item.amount.strip().replace(' ', '')
+                _merge_fields_from_item(merged_item, next_item, merge_spec=True)
+                logger.debug(f'{pdf_path}: 合并金额行: 行{start_index} + 行{j}, 金额="{merged_item.amount}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+                j += 1
+                continue
+            else:
+                # 当前已有金额，遇到新的有金额行，停止合并
+                logger.debug(f'{pdf_path}: 行{j}有金额且当前已有金额，停止当前商品合并')
+                    break
+                
+        # 3. 检查是否是项目名称的跨行
+                if _is_item_name_continuation_line(next_item):
+            _merge_fields_from_item(merged_item, next_item, merge_spec=True)
+            logger.debug(f'{pdf_path}: 合并项目名称跨行: 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+                    j += 1
+                    continue
+                
+        # 4. 检查是否是规格型号的折行
+                if _is_spec_continuation_line(next_item):
+            _merge_fields_from_item(merged_item, next_item, merge_spec=True)
+            logger.debug(f'{pdf_path}: 合并规格型号折行: 行{start_index} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+                    j += 1
+                    continue
+                
+        # 5. 检查是否是单个字段行（如只有单价、只有数量等）
+                if _is_single_field_line(next_item):
+            _merge_fields_from_item(merged_item, next_item, merge_spec=False)
+            logger.debug(f'{pdf_path}: 合并单个字段行: 行{start_index} + 行{j}, 继续检查后续是否有项目名称跨行')
+            j += 1
+                    continue
+                
+        # 6. 通用折行判断（保留原有逻辑，作为兜底）
+                if _is_generic_continuation_line(next_item):
+            _merge_fields_from_item(merged_item, next_item, merge_spec=True)
+            logger.debug(f'{pdf_path}: 合并通用折行字段: 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+            j += 1
+                    continue
+                
+        # 7. 其他字段按互补逻辑合并
+                if can_merge_items(merged_item, next_item):
+            # 合并互补字段（规格型号需要拼接）
+                    if next_item.spec and next_item.spec.strip():
+                        if merged_item.spec:
+                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
+                        else:
+                            merged_item.spec = next_item.spec.strip().replace(' ', '')
+            _merge_fields_from_item(merged_item, next_item, merge_spec=False)
+            logger.debug(f'{pdf_path}: 合并互补字段: 行{start_index} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+                    j += 1
+                    continue
+                
+        # 8. 不是需要合并的行，停止
+                break
+            
+    return j
+
+
 def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: str = '') -> List[LineItem]:
     """
     合并跨行的商品记录
@@ -1180,6 +1321,11 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
     2. 识别项目名称首行（*商品名称* 格式），动态合并跨行的项目名称（不限制行数）
     3. 合并折行的规格型号（参考现有逻辑）
     4. 根据字段互补关系合并其他字段
+    
+    统一处理逻辑：
+    - 情况1：项目名称首行 → 创建新对象并复制字段，使用统一合并循环
+    - 情况2：有金额 → 直接使用current_item，使用统一合并循环
+    - 情况3：无金额 → 使用current_item作为初始值，使用统一合并循环（查找和合并合并为一个循环）
     
     Args:
         items: 初始解析的商品明细列表（只包含商品明细数据）
@@ -1221,433 +1367,50 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
             merged_item.tax_rate = current_item.tax_rate or ''
             merged_item.tax_amount = current_item.tax_amount or ''
             
-            # 动态合并跨行的项目名称和规格型号（不限制行数）
-            j = i + 1
-            while j < len(items):
-                next_item = items[j]
+            # 使用统一合并循环
+            j = _merge_continuation_lines(merged_item, i, items, pdf_path)
                 
-                # 遇到新的项目名称首行，停止合并
-                if _is_item_name_first_line(next_item):
-                    logger.debug(f'{pdf_path}: 行{j}是新的项目名称首行，停止当前商品合并')
-                    break
-                
-                # 如果下一行有金额，但不是新的项目名称首行
-                # 且当前项目名称首行没有金额，应该合并（金额行可能是同一商品的金额信息）
-                if next_item.amount and next_item.amount.strip():
-                    # 如果当前项目名称首行还没有金额，合并这一行
-                    if not merged_item.amount or not merged_item.amount.strip():
-                        # 合并金额和其他字段
-                        if next_item.amount and next_item.amount.strip():
-                            merged_item.amount = next_item.amount.strip().replace(' ', '')
-                        # 规格型号：合并而不是替换（保留原有逻辑）
-                        if next_item.spec and next_item.spec.strip():
-                            if merged_item.spec:
-                                merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                            else:
-                                merged_item.spec = next_item.spec.strip().replace(' ', '')
-                        if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                            merged_item.unit = next_item.unit.strip().replace(' ', '')
-                        if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                            merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                        if next_item.price and next_item.price.strip() and not merged_item.price:
-                            merged_item.price = next_item.price.strip().replace(' ', '')
-                        if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                            merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                        if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                            merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                        logger.debug(f'{pdf_path}: 合并金额行: 行{i} + 行{j}, 金额="{merged_item.amount}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                        j += 1
-                        # 继续检查后续是否有项目名称跨行
-                        continue
-                    else:
-                        # 当前已有金额，遇到新的有金额行，停止合并
-                        logger.debug(f'{pdf_path}: 行{j}有金额且当前已有金额，停止当前商品合并')
-                        break
-                
-                # 检查是否是项目名称的跨行
-                if _is_item_name_continuation_line(next_item):
-                    # 合并项目名称
-                    if next_item.item_name and next_item.item_name.strip():
-                        merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
-                    # 同时合并规格型号（项目名称跨行可能也包含规格的后续部分）
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并项目名称跨行: 行{i} + 行{j}, 项目名称="{merged_item.item_name[:50]}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
-                # 检查是否是规格型号的折行
-                if _is_spec_continuation_line(next_item):
-                    # 合并规格型号
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并规格型号折行: 行{i} + 行{j}, 规格="{merged_item.spec[:50]}"')
-                    j += 1
-                    continue
-                
-                # 检查是否是单个字段行（如只有单价、只有数量等）
-                # 这种情况可能是字段被拆分到不同行了，合并后继续检查后续是否有项目名称跨行
-                if _is_single_field_line(next_item):
-                    # 合并单个字段
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                        merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并单个字段行: 行{i} + 行{j}, 继续检查后续是否有项目名称跨行')
-                    j += 1
-                    # 继续检查后续是否有项目名称跨行
-                    continue
-                
-                # 通用折行判断（保留原有逻辑，作为兜底）
-                # 如果一行只有1-2个字段且没有金额，可能是折行字段，合并所有字段
-                if _is_generic_continuation_line(next_item):
-                    # 合并所有字段（折行情况，保留原有逻辑）
-                    if next_item.item_name and next_item.item_name.strip():
-                        if merged_item.item_name:
-                            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
-                        else:
-                            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                        merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并通用折行字段: 行{i} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    # 继续检查后续是否有更多折行
-                    continue
-                
-                # 其他字段按互补逻辑合并
-                if can_merge_items(merged_item, next_item):
-                    # 合并互补字段
-                    # 规格型号：合并而不是替换（保留原有逻辑）
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                        merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.amount and next_item.amount.strip() and not merged_item.amount:
-                        merged_item.amount = next_item.amount.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并互补字段: 行{i} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
-                # 不是需要合并的行，停止
-                break
-            
-            merged_items.append(merged_item)
-            start_row = i
+                merged_items.append(merged_item)
+                start_row = i
             end_row = j - 1
             i = j
-            logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50]}", 金额="{merged_item.amount}"')
+                logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50]}", 金额="{merged_item.amount}"')
             continue
         
         # 情况2：当前记录有金额，说明是一个完整的商品记录
         if current_item.amount and current_item.amount.strip():
             merged_item = current_item
-            j = i + 1
             
-            # 检查后续行是否有需要合并的字段（如折行的规格、项目名称等）
-            while j < len(items):
-                next_item = items[j]
-                
-                # 如果下一行有金额，说明是新的商品，停止合并
-                if next_item.amount and next_item.amount.strip():
-                    break
-                
-                # 遇到新的项目名称首行，停止合并
-                if _is_item_name_first_line(next_item):
-                    break
-                
-                # 检查是否是项目名称的跨行
-                if _is_item_name_continuation_line(next_item):
-                    # 合并项目名称
-                    if next_item.item_name and next_item.item_name.strip():
-                        if merged_item.item_name:
-                            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
-                        else:
-                            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
-                    # 同时合并规格型号（项目名称跨行可能也包含规格的后续部分）
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并项目名称跨行: 行{i} + 行{j}, 项目名称="{merged_item.item_name[:50]}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
-                # 检查是否是规格型号的折行
-                if _is_spec_continuation_line(next_item):
-                    # 合并规格型号
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并规格型号折行: 行{i} + 行{j}, 规格="{merged_item.spec[:50]}"')
-                    j += 1
-                    continue
-                
-                # 检查是否是单个字段行（如只有单价、只有数量等）
-                # 这种情况可能是字段被拆分到不同行了，合并后继续检查后续是否有项目名称跨行
-                if _is_single_field_line(next_item):
-                    # 合并单个字段
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                            merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并单个字段行: 行{i} + 行{j}, 继续检查后续是否有项目名称跨行')
-                    j += 1
-                    # 继续检查后续是否有项目名称跨行
-                    continue
-                
-                # 通用折行判断（保留原有逻辑，作为兜底）
-                # 如果一行只有1-2个字段且没有金额，可能是折行字段，合并所有字段
-                if _is_generic_continuation_line(next_item):
-                    # 合并所有字段（折行情况，保留原有逻辑）
-                    if next_item.item_name and next_item.item_name.strip():
-                        if merged_item.item_name:
-                            merged_item.item_name = f'{merged_item.item_name}{next_item.item_name}'.strip().replace(' ', '')
-                        else:
-                            merged_item.item_name = next_item.item_name.strip().replace(' ', '')
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                            merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                        merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并通用折行字段: 行{i} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    # 继续检查后续是否有更多折行
-                    continue
-                
-                # 其他字段按互补逻辑合并
-                if can_merge_items(merged_item, next_item):
-                    # 合并互补字段
-                    # 规格型号：合并而不是替换（保留原有逻辑）
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
-                    if next_item.unit and next_item.unit.strip() and not merged_item.unit:
-                        merged_item.unit = next_item.unit.strip().replace(' ', '')
-                    if next_item.quantity and next_item.quantity.strip() and not merged_item.quantity:
-                        merged_item.quantity = next_item.quantity.strip().replace(' ', '')
-                    if next_item.price and next_item.price.strip() and not merged_item.price:
-                        merged_item.price = next_item.price.strip().replace(' ', '')
-                    if next_item.tax_rate and next_item.tax_rate.strip() and not merged_item.tax_rate:
-                        merged_item.tax_rate = next_item.tax_rate.strip().replace(' ', '')
-                    if next_item.tax_amount and next_item.tax_amount.strip() and not merged_item.tax_amount:
-                        merged_item.tax_amount = next_item.tax_amount.strip().replace(' ', '')
-                    logger.debug(f'{pdf_path}: 合并互补字段: 行{i} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
-                # 不是需要合并的行，停止
-                break
+            # 使用统一合并循环
+            j = _merge_continuation_lines(merged_item, i, items, pdf_path)
             
             merged_items.append(merged_item)
             i = j
             continue
         
-        # 情况3：当前记录没有金额，尝试与后续记录合并
-        merged = False
-        j = i + 1
-        while j < len(items):
-            next_item = items[j]
-            
-            # 遇到新的项目名称首行，停止查找
-            if _is_item_name_first_line(next_item):
-                break
-            
-            # 检查是否可以合并
-            if can_merge_items(current_item, next_item):
-                # 合并两个记录
-                merged_item = merge_two_items(current_item, next_item)
-                
-                # 继续检查是否有更多需要合并的行（如折行的规格、项目名称等）
-                k = j + 1
-                while k < len(items):
-                    more_item = items[k]
-                    
-                    # 如果下一行有金额，说明是新的商品，停止当前商品的合并
-                    if more_item.amount and more_item.amount.strip():
-                        logger.debug(f'{pdf_path}: 行{k}有金额，停止当前商品合并')
-                        break
-                    
-                    # 遇到新的项目名称首行，停止合并
-                    if _is_item_name_first_line(more_item):
-                        logger.debug(f'{pdf_path}: 行{k}是新的项目名称首行，停止当前商品合并')
-                        break
-                    
-                    # 检查是否是项目名称的跨行
-                    if _is_item_name_continuation_line(more_item):
-                        # 合并项目名称
-                        if more_item.item_name and more_item.item_name.strip():
-                            if merged_item.item_name:
-                                merged_item.item_name = f'{merged_item.item_name}{more_item.item_name}'.strip().replace(' ', '')
-                            else:
-                                merged_item.item_name = more_item.item_name.strip().replace(' ', '')
-                        # 同时合并规格型号（项目名称跨行可能也包含规格的后续部分）
-                        if more_item.spec and more_item.spec.strip():
-                            if merged_item.spec:
-                                merged_item.spec = f'{merged_item.spec}{more_item.spec}'.strip().replace(' ', '')
-                            else:
-                                merged_item.spec = more_item.spec.strip().replace(' ', '')
-                        logger.debug(f'{pdf_path}: 合并项目名称跨行: 行{i}+行{j} + 行{k}, 项目名称="{merged_item.item_name[:50]}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                        k += 1
-                        continue
-                    
-                    # 检查是否是规格型号的折行
-                    if _is_spec_continuation_line(more_item):
-                        # 合并规格型号
-                        if more_item.spec and more_item.spec.strip():
-                            if merged_item.spec:
-                                merged_item.spec = f'{merged_item.spec}{more_item.spec}'.strip().replace(' ', '')
-                            else:
-                                merged_item.spec = more_item.spec.strip().replace(' ', '')
-                        logger.debug(f'{pdf_path}: 合并规格型号折行: 行{i}+行{j} + 行{k}, 规格="{merged_item.spec[:50]}"')
-                        k += 1
-                        continue
-                    
-                    # 检查是否是单个字段行（如只有单价、只有数量等）
-                    # 这种情况可能是字段被拆分到不同行了，合并后继续检查后续是否有项目名称跨行
-                    if _is_single_field_line(more_item):
-                        # 合并单个字段
-                        if more_item.unit and more_item.unit.strip() and not merged_item.unit:
-                            merged_item.unit = more_item.unit.strip().replace(' ', '')
-                        if more_item.quantity and more_item.quantity.strip() and not merged_item.quantity:
-                            merged_item.quantity = more_item.quantity.strip().replace(' ', '')
-                        if more_item.price and more_item.price.strip() and not merged_item.price:
-                            merged_item.price = more_item.price.strip().replace(' ', '')
-                        if more_item.tax_rate and more_item.tax_rate.strip() and not merged_item.tax_rate:
-                            merged_item.tax_rate = more_item.tax_rate.strip().replace(' ', '')
-                        if more_item.tax_amount and more_item.tax_amount.strip() and not merged_item.tax_amount:
-                            merged_item.tax_amount = more_item.tax_amount.strip().replace(' ', '')
-                        logger.debug(f'{pdf_path}: 合并单个字段行: 行{i}+行{j} + 行{k}, 继续检查后续是否有项目名称跨行')
-                        k += 1
-                        # 继续检查后续是否有项目名称跨行
-                        continue
-                    
-                    # 通用折行判断（保留原有逻辑，作为兜底）
-                    # 如果一行只有1-2个字段且没有金额，可能是折行字段，合并所有字段
-                    if _is_generic_continuation_line(more_item):
-                        # 合并所有字段（折行情况，保留原有逻辑）
-                        if more_item.item_name and more_item.item_name.strip():
-                            if merged_item.item_name:
-                                merged_item.item_name = f'{merged_item.item_name}{more_item.item_name}'.strip().replace(' ', '')
-                            else:
-                                merged_item.item_name = more_item.item_name.strip().replace(' ', '')
-                        if more_item.spec and more_item.spec.strip():
-                            if merged_item.spec:
-                                merged_item.spec = f'{merged_item.spec}{more_item.spec}'.strip().replace(' ', '')
-                            else:
-                                merged_item.spec = more_item.spec.strip().replace(' ', '')
-                        if more_item.unit and more_item.unit.strip() and not merged_item.unit:
-                            merged_item.unit = more_item.unit.strip().replace(' ', '')
-                        if more_item.quantity and more_item.quantity.strip() and not merged_item.quantity:
-                                merged_item.quantity = more_item.quantity.strip().replace(' ', '')
-                        if more_item.price and more_item.price.strip() and not merged_item.price:
-                            merged_item.price = more_item.price.strip().replace(' ', '')
-                        if more_item.tax_rate and more_item.tax_rate.strip() and not merged_item.tax_rate:
-                            merged_item.tax_rate = more_item.tax_rate.strip().replace(' ', '')
-                        if more_item.tax_amount and more_item.tax_amount.strip() and not merged_item.tax_amount:
-                            merged_item.tax_amount = more_item.tax_amount.strip().replace(' ', '')
-                        logger.debug(f'{pdf_path}: 合并通用折行字段: 行{i}+行{j} + 行{k}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                        k += 1
-                        # 继续检查后续是否有更多折行
-                        continue
-                    
-                    # 其他字段按互补逻辑合并
-                    if can_merge_items(merged_item, more_item):
-                        # 合并互补字段
-                        # 规格型号：合并而不是替换（保留原有逻辑）
-                        if more_item.spec and more_item.spec.strip():
-                            if merged_item.spec:
-                                merged_item.spec = f'{merged_item.spec}{more_item.spec}'.strip().replace(' ', '')
-                            else:
-                                merged_item.spec = more_item.spec.strip().replace(' ', '')
-                        if more_item.unit and more_item.unit.strip() and not merged_item.unit:
-                            merged_item.unit = more_item.unit.strip().replace(' ', '')
-                        if more_item.quantity and more_item.quantity.strip() and not merged_item.quantity:
-                            merged_item.quantity = more_item.quantity.strip().replace(' ', '')
-                        if more_item.price and more_item.price.strip() and not merged_item.price:
-                            merged_item.price = more_item.price.strip().replace(' ', '')
-                        if more_item.tax_rate and more_item.tax_rate.strip() and not merged_item.tax_rate:
-                            merged_item.tax_rate = more_item.tax_rate.strip().replace(' ', '')
-                        if more_item.tax_amount and more_item.tax_amount.strip() and not merged_item.tax_amount:
-                            merged_item.tax_amount = more_item.tax_amount.strip().replace(' ', '')
-                        logger.debug(f'{pdf_path}: 合并互补字段: 行{i}+行{j} + 行{k}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                        k += 1
-                        continue
-                    
-                    # 不是需要合并的行，停止
-                        break
-                
-                merged_items.append(merged_item)
-                start_row = i
-                end_row = k - 1
-                i = k
-                merged = True
-                logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50]}", 金额="{merged_item.amount}"')
-                break
-            
-            j += 1
+        # 情况3：当前记录没有金额，使用统一合并循环处理（查找和合并合并为一个循环）
+        merged_item = current_item
         
-        if not merged:
-            # 如果无法合并，保留当前记录（可能是只有项目名称的记录）
-            if current_item.item_name:
-                merged_items.append(current_item)
-            i += 1
+        # 使用统一合并循环（如果merged_item无金额，遇到有金额的行会自动合并）
+        j = _merge_continuation_lines(merged_item, i, items, pdf_path)
+        
+        # 判断是否成功合并（有金额或其他有效字段）
+        has_amount = merged_item.amount and merged_item.amount.strip()
+        has_other_fields = (merged_item.spec or merged_item.unit or merged_item.quantity or 
+                           merged_item.price or merged_item.tax_rate or merged_item.tax_amount)
+        
+        if has_amount or (has_other_fields and merged_item.item_name):
+            # 成功合并，添加到结果列表
+            merged_items.append(merged_item)
+            start_row = i
+            end_row = j - 1
+            logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 金额="{merged_item.amount}"')
+        elif merged_item.item_name:
+            # 无法合并但有项目名称，保留当前记录
+            merged_items.append(merged_item)
+            logger.debug(f'{pdf_path}: 保留无法合并的记录: 行{i}, 项目名称="{merged_item.item_name[:50]}"')
+        
+        i = j
     
     # 合并完成后，去掉所有字段中的空格
     for item in merged_items:

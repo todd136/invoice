@@ -25,7 +25,8 @@ def get_executable_dir():
     """
     # sys.executable 在打包后指向可执行文件路径，在开发环境指向 Python 解释器路径
     # 获取其父目录即可得到可执行文件所在目录
-    executable_path = Path(sys.executable)
+    # executable_path = Path(sys.executable)
+    executable_path = Path(sys.argv[0])
     return executable_path.parent.absolute()
 
 
@@ -37,7 +38,7 @@ def main():
     
     # 或者使用硬编码路径
     # base_path = '/Volumes/share/temp/receipt'
-    print(base_path)
+    print("executable path = "+ base_path)
 
     # 设置日志系统
     # 全局日志级别：INFO
