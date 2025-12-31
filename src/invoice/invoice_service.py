@@ -738,6 +738,23 @@ def _find_item_name(
     if not item_name:
         for word in sorted_line_words:
             candidate_text = clean_garbled_chars(word['text'])
+            word_center = (word['x0'] + word['x1']) / 2
+            
+            # 检查该单词是否已经匹配到其他列（排除项目名称列）
+            # 如果已经匹配到其他列，不应该作为项目名称
+            matched_other_column = False
+            for keyword, (col_x0, col_x1) in col_x_ranges.items():
+                if keyword == '项目名称':
+                    continue
+                # 检查单词中心点是否在该列的范围内
+                if col_x0 <= word_center <= col_x1:
+                    matched_other_column = True
+                    break
+            
+            # 如果已经匹配到其他列，跳过该单词
+            if matched_other_column:
+                continue
+            
             # 首先尝试严格匹配（*项目名称*费用名称）
             if PROJECT_NAME_REGEX.search(candidate_text):
                 item_name = candidate_text.strip()
