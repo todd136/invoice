@@ -644,25 +644,53 @@ def _create_column_matcher(col_x_ranges: dict, sorted_line_words: List[dict]) ->
         matched_words = []
         for word in sorted_line_words:
             word_center = (word['x0'] + word['x1']) / 2
-            
-            # 特殊处理：对于项目名称列，如果单词中心坐标小于项目名称列的x0，
-            # 且没有匹配到其他列，则将其匹配到项目名称列（处理项目名称折行的情况）
+
+            # 特殊处理：对于项目名称列
             is_item_name_column = (keyword == '项目名称')
-            if is_item_name_column and word_center < col_x0:
-                # 检查该单词是否匹配到其他列
-                matched_other = False
-                for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
-                    if other_keyword == keyword:
+            if is_item_name_column:
+                # 情况1：单词在项目名称列左侧，且没有匹配到其他列
+                # （处理项目名称折行的情况）
+                if word_center < col_x0:
+                    # 检查该单词是否匹配到其他列
+                    matched_other = False
+                    for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                        if other_keyword == keyword:
+                            continue
+                        if other_x0 <= word_center <= other_x1:
+                            matched_other = True
+                            break
+
+                    # 如果没有匹配到其他列，则匹配到项目名称列
+                    if not matched_other:
+                        matched_words.append(word)
                         continue
-                    if other_x0 <= word_center <= other_x1:
-                        matched_other = True
-                        break
-                
-                # 如果没有匹配到其他列，则匹配到项目名称列
-                if not matched_other:
-                    matched_words.append(word)
-                    continue
-            
+
+                # 情况2：单词在项目名称列右侧，但在规格型号列左侧
+                # 且没有匹配到其他列，则将其匹配到项目名称列（处理项目名称向右延伸的情况）
+                elif word_center > col_x1:
+                    # 获取规格型号列的x0（如果存在），作为右边界
+                    spec_col_x0 = None
+                    if '规格型号' in col_x_ranges:
+                        spec_col_x0, _ = col_x_ranges['规格型号']
+
+                    # 如果单词在规格型号列左侧（或规格型号列不存在），且没有匹配到其他列
+                    if spec_col_x0 is None or word_center < spec_col_x0:
+                        # 检查该单词是否匹配到其他列
+
+                        matched_other = False
+
+                        for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                            if other_keyword == keyword:
+                                continue
+                            if other_x0 <= word_center <= other_x1:
+                                matched_other = True
+                                break
+
+                        # 如果没有匹配到其他列，则匹配到项目名称列
+                        if not matched_other:
+                            matched_words.append(word)
+                            continue
+
             # 优先使用单词中心点判断，确保更精确的匹配
             # 只有当中心点在列范围内时，才认为该单词属于该列
             if col_x0 <= word_center <= col_x1:
