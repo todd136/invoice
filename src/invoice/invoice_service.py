@@ -1243,14 +1243,14 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
         合并结束的位置（下一个要处理的索引）
     """
     j = start_index + 1
-            while j < len(items):
-                next_item = items[j]
-                
+    while j < len(items):
+        next_item = items[j]
+        
         # 1. 遇到新的项目名称首行，停止合并
         if _is_item_name_first_line(next_item):
             logger.debug(f'{pdf_path}: 行{j}是新的项目名称首行，停止当前商品合并')
-                    break
-                
+            break
+        
         # 2. 如果下一行有金额，但不是新的项目名称首行
         if next_item.amount and next_item.amount.strip():
             # 如果当前合并项还没有金额，合并这一行
@@ -1265,52 +1265,52 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
             else:
                 # 当前已有金额，遇到新的有金额行，停止合并
                 logger.debug(f'{pdf_path}: 行{j}有金额且当前已有金额，停止当前商品合并')
-                    break
-                
+                break
+        
         # 3. 检查是否是项目名称的跨行
-                if _is_item_name_continuation_line(next_item):
+        if _is_item_name_continuation_line(next_item):
             _merge_fields_from_item(merged_item, next_item, merge_spec=True)
             logger.debug(f'{pdf_path}: 合并项目名称跨行: 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
+            j += 1
+            continue
+        
         # 4. 检查是否是规格型号的折行
-                if _is_spec_continuation_line(next_item):
+        if _is_spec_continuation_line(next_item):
             _merge_fields_from_item(merged_item, next_item, merge_spec=True)
             logger.debug(f'{pdf_path}: 合并规格型号折行: 行{start_index} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
+            j += 1
+            continue
+        
         # 5. 检查是否是单个字段行（如只有单价、只有数量等）
-                if _is_single_field_line(next_item):
+        if _is_single_field_line(next_item):
             _merge_fields_from_item(merged_item, next_item, merge_spec=False)
             logger.debug(f'{pdf_path}: 合并单个字段行: 行{start_index} + 行{j}, 继续检查后续是否有项目名称跨行')
             j += 1
-                    continue
-                
+            continue
+        
         # 6. 通用折行判断（保留原有逻辑，作为兜底）
-                if _is_generic_continuation_line(next_item):
+        if _is_generic_continuation_line(next_item):
             _merge_fields_from_item(merged_item, next_item, merge_spec=True)
             logger.debug(f'{pdf_path}: 合并通用折行字段: 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
             j += 1
-                    continue
-                
+            continue
+        
         # 7. 其他字段按互补逻辑合并
-                if can_merge_items(merged_item, next_item):
+        if can_merge_items(merged_item, next_item):
             # 合并互补字段（规格型号需要拼接）
-                    if next_item.spec and next_item.spec.strip():
-                        if merged_item.spec:
-                            merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
-                        else:
-                            merged_item.spec = next_item.spec.strip().replace(' ', '')
+            if next_item.spec and next_item.spec.strip():
+                if merged_item.spec:
+                    merged_item.spec = f'{merged_item.spec}{next_item.spec}'.strip().replace(' ', '')
+                else:
+                    merged_item.spec = next_item.spec.strip().replace(' ', '')
             _merge_fields_from_item(merged_item, next_item, merge_spec=False)
             logger.debug(f'{pdf_path}: 合并互补字段: 行{start_index} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
-                    j += 1
-                    continue
-                
+            j += 1
+            continue
+        
         # 8. 不是需要合并的行，停止
-                break
-            
+        break
+    
     return j
 
 
@@ -1371,12 +1371,12 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
             
             # 使用统一合并循环
             j = _merge_continuation_lines(merged_item, i, items, pdf_path)
-                
-                merged_items.append(merged_item)
-                start_row = i
+            
+            merged_items.append(merged_item)
+            start_row = i
             end_row = j - 1
             i = j
-                logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50]}", 金额="{merged_item.amount}"')
+            logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50]}", 金额="{merged_item.amount}"')
             continue
         
         # 情况2：当前记录有金额，说明是一个完整的商品记录
