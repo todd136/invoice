@@ -26,7 +26,6 @@ def get_executable_dir():
     # sys.executable 在打包后指向可执行文件路径，在开发环境指向 Python 解释器路径
     # 获取其父目录即可得到可执行文件所在目录
     executable_path = Path(sys.argv[0])
-    logging.info("开始处理发票，路径 = " + str(executable_path))
     return executable_path.parent.absolute()
 
 
@@ -34,11 +33,11 @@ def main():
     """主函数"""
     
     # 获取可执行文件所在目录（打包后）
-    base_path = get_executable_dir()
+    # base_path = get_executable_dir()
     
     # 或者使用硬编码路径
-    # base_path = '/Volumes/share/temp/receipt'
-    print(base_path)
+    base_path = '/Volumes/share/temp/receipt'
+    logging.info("开始处理发票，路径 = " + str(base_path))
 
     # 设置日志系统
     # 全局日志级别：INFO
