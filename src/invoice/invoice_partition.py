@@ -7,7 +7,7 @@ import math
 import re
 from typing import List, Optional, Tuple
 
-from .text_utils import clean_garbled_chars
+from .text_utils import clean_garbled_chars, reconstruct_text_from_words
 from .regex_utils import DATE_REGEX_LOOSE
 
 # 获取模块级别的日志记录器
@@ -1468,44 +1468,6 @@ def _log_word_lines_grouping(lines_dict: dict):
 
     logger.debug("="*80)
     logger.debug(f"总共 {len(sorted_lines)} 行\n")
-
-
-def reconstruct_text_from_words(words: List[dict]) -> str:
-    """
-    从单词列表重建文本（按Y-X排序）
-    
-    Args:
-        words: 单词列表
-    
-    Returns:
-        重建后的文本
-    """
-    if not words:
-        return ""
-    
-    # 按Y坐标分组（同一行的单词）
-    lines_dict = {}
-    y_tolerance = 3.0
-    
-    for word in words:
-        # 使用容差将相近Y坐标的单词归为同一行
-        y_key = round(word['top'] / y_tolerance) * y_tolerance
-        if y_key not in lines_dict:
-            lines_dict[y_key] = []
-        lines_dict[y_key].append(word)
-    
-    # 按Y坐标排序（从上到下，top值越小越靠上）
-    # 在pdfplumber中，top值越大表示越靠下，所以应该从小到大排序
-    sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0], reverse=False)
-    
-    # 每行内按X坐标排序（从左到右）
-    result_lines = []
-    for y, line_words in sorted_lines:
-        sorted_words = sorted(line_words, key=lambda w: w['x0'])
-        line_text = ' '.join([w['text'] for w in sorted_words])
-        result_lines.append(line_text)
-    
-    return '\n'.join(result_lines)
 
 
 def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], List[dict], List[dict], List[dict]]:

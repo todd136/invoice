@@ -13,12 +13,11 @@ from .regex_utils import (
     PROJECT_NAME_REGEX, TAX_ID_PATTERNS, TAX_ID_GLOBAL_REGEX, LONG_NUMBER_REGEX,
     ROOM_NUMBER_REGEX, ROOM_ALPHA_REGEX, COMPANY_NAME_REGEX, normalize_alpha_num
 )
-from .text_utils import clean_garbled_chars
+from .text_utils import clean_garbled_chars, reconstruct_text_from_words, normalize_text_whitespace
 from .number_utils import is_tax_id, score_candidate
 from .invoice_partition import (
-    partition_invoice_by_lines, 
-    print_partition_content, 
-    reconstruct_text_from_words,
+    partition_invoice_by_lines,
+    print_partition_content,
     group_words_by_y
 )
 
@@ -45,7 +44,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
     Raises:
         Exception: 解析失败
     """
-    logger.info(f'开始处理发票 {pdf_file_path}...')
+    logging.info(f'开始处理发票 {pdf_file_path}...')
 
     invoice = Invoice()
     invoice.name = os.path.basename(pdf_file_path)
@@ -53,7 +52,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
     try:
         with pdfplumber.open(pdf_file_path) as pdf:
             total_pages = len(pdf.pages)
-            logger.info(f'发票共有 {total_pages} 页')
+            logging.info(f'发票共有 {total_pages} 页')
 
             # 存储第一页的分区结果（用于提取基本信息和列坐标）
             first_page_header_words = None
@@ -65,7 +64,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
 
             # 遍历所有页面进行处理
             for page_idx, page in enumerate(pdf.pages):
-                logger.info(f'处理第 {page_idx + 1}/{total_pages} 页...')
+                logging.info(f'处理第 {page_idx + 1}/{total_pages} 页...')
 
                 # 1. 提取文本内容（过滤掉印章红色文字）
                 words = page.extract_words(
@@ -79,7 +78,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                 clean_words = filter_seal_text(page, words)
 
                 # 2. 使用分割线进行发票分区（对每页都进行分区）
-                logger.info(f'开始使用分割线对第 {page_idx + 1} 页进行发票分区...')
+                logging.debug(f'开始使用分割线对第 {page_idx + 1} 页进行发票分区...')
                 header_words, buyer_words, seller_words, table_words = partition_invoice_by_lines(
                     page, clean_words
                 )
@@ -89,8 +88,9 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                     first_page_header_words = header_words
                     first_page_buyer_words = buyer_words
                     first_page_table_words = table_words
-                    # 打印各分区内容（调试用）
-                    print_partition_content(header_words, buyer_words, seller_words, table_words)
+                    # 只有在DEBUG日志级别时才打印各分区内容（调试用）
+                    if logger.isEnabledFor(logging.DEBUG):
+                        print_partition_content(header_words, buyer_words, seller_words, table_words)
                 else:
                     logger.debug(f'第 {page_idx + 1} 页分区结果: 发票头={len(header_words)}个单词, '
                                f'购买方={len(buyer_words)}个单词, '
@@ -104,7 +104,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                     )
                     if page_raw_items:
                         all_raw_items.extend(page_raw_items)
-                        logger.info(f'第 {page_idx + 1} 页提取到 {len(page_raw_items)} 条原始明细项')
+                        logging.debug(f'第 {page_idx + 1} 页提取到 {len(page_raw_items)} 条原始明细项')
 
             # 3. 提取发票基本信息（只使用第一页的分区结果）
             if first_page_header_words is not None and first_page_buyer_words is not None:
@@ -122,7 +122,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
 
             # 4. 解析商品明细（合并所有页面的 raw_items，然后进行跨行商品记录合并）
             if all_raw_items:
-                logger.info(f'合并所有页面，共 {len(all_raw_items)} 条原始明细项')
+                logging.debug(f'合并所有页面，共 {len(all_raw_items)} 条原始明细项')
                 # 需要获取列坐标信息用于跨行合并（使用第一页的表头信息）
                 if first_page_table_words:
                     # 从第一页的 table_words 中识别列坐标（使用第一页的表头）
@@ -147,7 +147,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
             if not invoice.items:
                 raise Exception('未能解析到发票明细数据')
 
-            logger.info(f'发票 {pdf_file_path} 解析完成，共 {len(invoice.items)} 条明细')
+            logging.info(f'发票 {pdf_file_path} 解析完成，共 {len(invoice.items)} 条明细')
             return invoice
 
     except Exception as e:
@@ -337,8 +337,7 @@ def extract_buyer_name_from_words(buyer_words: List[dict]) -> str:
     if match:
         buyer = match.group(1).strip()
         # 清理可能包含的换行符，但保留空格（公司名称中可能有空格）
-        buyer = re.sub(r'\s*\n\s*', '', buyer)  # 去掉换行符及其周围的空格
-        buyer = re.sub(r'\s+', ' ', buyer)  # 将多个连续空格合并为一个
+        buyer = normalize_text_whitespace(buyer)
         # 如果提取的内容包含关键词，截取到关键词之前（双重保险）
         stop_keywords = ['统一社会信用代码', '纳税人识别号', '销售方', '购买方', '买方', '卖方', '信息']
         for kw in stop_keywords:
@@ -1001,7 +1000,7 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
     # 合并跨行的商品记录
     items = merge_split_line_items(raw_items, col_x_starts, pdf_path)
 
-    logger.info(f'{pdf_path}: 合并后共有 {len(items)} 条明细')
+    logging.info(f'{pdf_path}: 合并后共有 {len(items)} 条明细')
 
     if len(items) == 0 and len(raw_items) > 0:
         logger.warning(f'{pdf_path}: 处理了 {len(raw_items)} 行数据，但未能解析到任何商品明细')
@@ -1494,43 +1493,6 @@ def can_merge_items(item1: LineItem, item2: LineItem) -> bool:
             return True
     
     return False
-
-
-def merge_two_items(item1: LineItem, item2: LineItem) -> LineItem:
-    """
-    合并两个商品记录
-    
-    Args:
-        item1: 第一个商品记录
-        item2: 第二个商品记录
-        
-    Returns:
-        合并后的商品记录
-    """
-    merged = LineItem()
-    
-    # 项目名称：优先使用 item1 的（通常是第一行）
-    merged.item_name = item1.item_name or item2.item_name
-    
-    # 规格型号：合并两个记录的规格（可能是折行显示，去掉空格）
-    spec1 = (item1.spec or '').strip()
-    spec2 = (item2.spec or '').strip()
-    if spec1 and spec2:
-        # 如果两个都有规格，合并（可能是折行），去掉空格
-        merged.spec = f'{spec1}{spec2}'.strip().replace(' ', '')
-    else:
-        merged.spec = (spec1 or spec2).strip().replace(' ', '')
-    
-    # 其他字段：优先使用有值的字段
-    merged.unit = item1.unit or item2.unit
-    merged.quantity = item1.quantity or item2.quantity
-    merged.price = item1.price or item2.price
-    merged.amount = item1.amount or item2.amount
-    merged.tax_rate = item1.tax_rate or item2.tax_rate
-    merged.tax_amount = item1.tax_amount or item2.tax_amount
-    
-    return merged
-
 
 
 

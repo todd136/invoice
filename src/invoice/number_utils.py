@@ -68,25 +68,6 @@ def score_candidate(s: str) -> int:
         return 90
     return len(s)
 
-
-def is_integer(s: str) -> bool:
-    """检查字符串是否是整数"""
-    try:
-        int(s)
-        return True
-    except ValueError:
-        return False
-
-
-def is_float(s: str) -> bool:
-    """检查字符串是否是浮点数"""
-    try:
-        float(s)
-        return True
-    except ValueError:
-        return False
-
-
 def extract_number(s: str) -> Optional[str]:
     """从字符串中提取数字（包括小数）"""
     # 匹配数字，包括小数

@@ -64,22 +64,3 @@ def setup_logger(
         logger = logging.getLogger(module_name)
         logger.setLevel(level)
         logging.info(f'模块 "{module_name}" 日志级别设置为: {logging.getLevelName(level)}')
-
-
-def get_logger(name: str) -> logging.Logger:
-    """
-    获取指定名称的日志记录器
-    
-    Args:
-        name: 日志记录器名称，通常使用 __name__
-    
-    Returns:
-        logging.Logger 实例
-    
-    Examples:
-        logger = get_logger(__name__)
-        logger.debug('调试信息')
-        logger.info('普通信息')
-    """
-    return logging.getLogger(name)
-

@@ -37,7 +37,6 @@ def main():
     
     # 或者使用硬编码路径
     base_path = '/Volumes/share/temp/receipt'
-    logging.info("开始处理发票，路径 = " + str(base_path))
 
     # 设置日志系统
     # 全局日志级别：INFO
@@ -48,11 +47,13 @@ def main():
         module_levels={'src.invoice': logging.INFO}
     )
 
+    logging.info(f'开始在主路径： {str(base_path)} 下处理发票...')
+
     # 创建发票处理器并执行批量处理
     processor = InvoiceProcessor(base_path)
-    invoice_list = processor.process_batch()
+    processor.process_batch()
 
-    logging.info('程序处理完成，即将退出...')
+    logging.info('发票解析完成，即将退出...')
 
 
 if __name__ == '__main__':
