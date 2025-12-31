@@ -8,6 +8,7 @@ import re
 from typing import List, Optional, Tuple
 
 from .text_utils import clean_garbled_chars
+from .regex_utils import DATE_REGEX_LOOSE
 
 # 获取模块级别的日志记录器
 logger = logging.getLogger(__name__)
@@ -526,6 +527,7 @@ def partition_three_regions_from_grouped_data(
     
     header_last_y = None
     table_first_y = None
+    date_value_y = None  # 日期值行的Y坐标
     
     # 查找关键边界行
     for y, line_words in lines_dict.items():
@@ -536,6 +538,35 @@ def partition_three_regions_from_grouped_data(
         if table_first_keyword in line_text:
             if table_first_y is None or y < table_first_y:  # 选择最靠上的"项目名称"行
                 table_first_y = y
+    
+    # 优化：查找开票日期值行
+    # 1. 先检查"开票日期"行本身是否包含日期格式
+    if header_last_y is not None:
+        date_line_words = lines_dict.get(header_last_y, [])
+        date_line_text = ' '.join([w['text'] for w in date_line_words])
+        if DATE_REGEX_LOOSE.search(date_line_text):
+            # "开票日期"行本身包含日期格式，不需要查找其他行
+            logger.debug(f'在"开票日期"行(Y={header_last_y:.2f})中找到日期格式: {date_line_text[:50]}')
+            date_value_y = header_last_y
+        else:
+            # 2. 如果"开票日期"行不包含日期格式，检查其下方容差范围内的行
+            DATE_VALUE_TOLERANCE = 15.0  # 容差范围（像素）
+            sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
+            
+            for y, line_words in sorted_lines:
+                # 只检查在"开票日期"行下方且容差范围内的行
+                if y > header_last_y and (y - header_last_y) <= DATE_VALUE_TOLERANCE:
+                    line_text = ' '.join([w['text'] for w in line_words])
+                    if DATE_REGEX_LOOSE.search(line_text):
+                        # 找到日期值行
+                        date_value_y = y
+                        logger.debug(f'在"开票日期"行(Y={header_last_y:.2f})下方找到日期值行(Y={y:.2f}): {line_text[:50]}')
+                        break
+    
+    # 如果找到日期值行，将发票头边界扩展到包含日期值行
+    if date_value_y is not None and date_value_y > header_last_y:
+        header_last_y = date_value_y
+        logger.debug(f'扩展发票头边界到包含日期值行: Y={header_last_y:.2f}')
     
     logger.debug(f'关键边界行: 发票头最后一行(开票日期)Y={header_last_y}, 表格第一行(项目名称)Y={table_first_y}')
     
@@ -1111,6 +1142,68 @@ def _assign_tax_id_by_name_position(
     return 'buyer' if word_x < mid_x else 'seller'
 
 
+def deduplicate_words_by_position(line_words: List[dict], x_tolerance: float = 10.0) -> List[dict]:
+    """
+    按位置去重：识别X坐标相近的重复单词
+    
+    策略：
+    1. 按X坐标排序
+    2. 对于每个单词，检查是否有其他单词：
+       - 文本相同（清理后比较）
+       - X坐标相近（在容差范围内）
+    3. 如果找到，只保留X坐标最靠左的
+    
+    Args:
+        line_words: 一行的单词列表
+        x_tolerance: X坐标容差（像素），默认10.0
+    
+    Returns:
+        去重后的单词列表
+    """
+    if not line_words:
+        return line_words
+    
+    # 按X坐标排序
+    sorted_words = sorted(line_words, key=lambda w: w['x0'])
+    deduplicated = []
+    used_indices = set()
+    
+    for i, word in enumerate(sorted_words):
+        if i in used_indices:
+            continue
+        
+        # 查找位置相近且文本相同的单词
+        duplicates = [i]
+        word_text = clean_garbled_chars(word['text'])
+        
+        for j in range(i + 1, len(sorted_words)):
+            if j in used_indices:
+                continue
+            
+            other_word = sorted_words[j]
+            # 检查X坐标是否相近
+            if abs(word['x0'] - other_word['x0']) <= x_tolerance:
+                # 检查文本是否相同（清理后比较）
+                other_text = clean_garbled_chars(other_word['text'])
+                if word_text == other_text:
+                    duplicates.append(j)
+        
+        # 如果有重复，只保留X坐标最靠左的（第一个）
+        if len(duplicates) > 1:
+            duplicate_positions = [sorted_words[d]['x0'] for d in duplicates]
+            logger.debug(f'发现重复单词: "{word_text}" 在位置 {duplicate_positions}, 保留位置 {word["x0"]:.2f}')
+            # 保留第一个（已经是最靠左的）
+            deduplicated.append(word)
+            # 标记其他为已使用
+            for d in duplicates[1:]:
+                used_indices.add(d)
+        else:
+            # 没有重复，直接保留
+            deduplicated.append(word)
+    
+    return deduplicated
+
+
 def _assign_word_by_keyword_or_position(
     word: dict,
     page_width: float
@@ -1186,9 +1279,50 @@ def split_buyer_seller(
         lines_dict = group_words_by_y(buyer_seller_words, y_tolerance=3.0)
         sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
         
+        # 打印去重前的数据
+        logger.debug("\n" + "="*80)
+        logger.debug("购销方数据去重前（按行）")
+        logger.debug("="*80)
+        total_before = 0
         for y, line_words in sorted_lines:
-            # 按X坐标排序
             sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
+            line_text = ' '.join([w['text'] for w in sorted_line_words])
+            logger.debug(f'行Y={y:.2f}: {len(line_words)}个单词 - {line_text[:100]}')
+            total_before += len(line_words)
+        logger.debug(f'总计: {total_before}个单词')
+        
+        # 打印去重后的数据
+        logger.debug("\n" + "="*80)
+        logger.debug("购销方数据去重后（按行）")
+        logger.debug("="*80)
+        total_after = 0
+        deduplicated_lines = []
+        
+        for y, line_words in sorted_lines:
+            # 去重处理：按位置聚类去重
+            deduplicated_line_words = deduplicate_words_by_position(line_words, x_tolerance=10.0)
+            deduplicated_lines.append((y, deduplicated_line_words))
+            total_after += len(deduplicated_line_words)
+            
+            # 打印去重效果
+            if len(deduplicated_line_words) < len(line_words):
+                before_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
+                after_text = ' '.join([w['text'] for w in sorted(deduplicated_line_words, key=lambda w: w['x0'])])
+                logger.debug(f'\n行Y={y:.2f} 去重效果: {len(line_words)}个单词 -> {len(deduplicated_line_words)}个单词 (删除{len(line_words) - len(deduplicated_line_words)}个)')
+                logger.debug(f'  去重前: {before_text[:150]}')
+                logger.debug(f'  去重后: {after_text[:150]}')
+            else:
+                # 即使没有去重，也打印去重后的数据
+                after_text = ' '.join([w['text'] for w in sorted(deduplicated_line_words, key=lambda w: w['x0'])])
+                logger.debug(f'行Y={y:.2f}: {len(deduplicated_line_words)}个单词 - {after_text[:100]}')
+        
+        logger.debug(f'总计: {total_after}个单词 (去重前{total_before}个，删除{total_before - total_after}个)')
+        logger.debug("="*80 + "\n")
+        
+        # 使用去重后的数据进行后续处理
+        for y, deduplicated_line_words in deduplicated_lines:
+            # 按X坐标排序（使用去重后的数据）
+            sorted_line_words = sorted(deduplicated_line_words, key=lambda w: w['x0'])
             
             # 查找该行中所有包含"名称"的单词
             name_keywords = []
