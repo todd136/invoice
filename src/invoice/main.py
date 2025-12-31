@@ -33,10 +33,10 @@ def main():
     """主函数"""
     
     # 获取可执行文件所在目录（打包后）
-    # base_path = get_executable_dir()
+    base_path = get_executable_dir()
     
     # 或者使用硬编码路径
-    base_path = '/Volumes/share/temp/receipt'
+    # base_path = '/Volumes/share/temp/receipt'
 
     # 设置日志系统
     # 全局日志级别：INFO
