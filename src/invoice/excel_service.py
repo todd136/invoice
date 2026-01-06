@@ -64,7 +64,7 @@ def find_next_row(ws: Worksheet) -> int:
     return last_row + 1
 
 
-def batch_export_to_excel(invoice_list: List[Invoice], filename: str) -> None:
+def batch_export_to_excel(invoice_list: List[Invoice], filename: str) -> int:
     """
     批量将发票列表导出到 Excel 文件
     
@@ -94,11 +94,14 @@ def batch_export_to_excel(invoice_list: List[Invoice], filename: str) -> None:
     # 2. 确定写入起点（最后一行 + 1）
     start_row = find_next_row(ws)
 
-    # 3. 写入数据行
+    # 3. 过滤已经写入的发票信息
+    filtered_invoice_list = filter_existing_invoices(ws, invoice_list)
+
+    # 4. 写入数据行
     current_row = start_row
     handle_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    for invoice in invoice_list:
+    for invoice in filtered_invoice_list:
         for item in invoice.items:
             # 写入数据到单元格
             # A 列: 发票号码
@@ -138,7 +141,48 @@ def batch_export_to_excel(invoice_list: List[Invoice], filename: str) -> None:
     try:
         wb.save(filename)
         logging.info(f'数据已成功导出到: {filename}')
+        return len(filtered_invoice_list)
     except Exception as e:
         raise Exception(f'保存 Excel 文件失败: {e}')
 
+def check_invoice_exists_in_excel(ws: Worksheet, invoice: Invoice) -> bool:
+    """
+    检查发票是否已经在Excel工作表中存在
 
+    Args:
+        ws: Excel工作表对象
+        invoice: 待检查的发票对象
+
+    Returns:
+        bool: True表示发票已存在，False表示不存在
+    """
+    # 从第2行开始检查（第1行是表头）
+    for row in range(2, ws.max_row + 1):
+        # 检查关键字段：发票号码(A列)
+        existing_code = ws.cell(row=row, column=1).value
+
+        # 如果三个关键字段都匹配，认为是同一张发票
+        if existing_code == invoice.code:
+            return True
+
+    return False
+
+def filter_existing_invoices(ws: Worksheet, invoice_list: List[Invoice]) -> List[Invoice]:
+    """
+    过滤掉已经在Excel中存在的发票
+
+    Args:
+        ws: Excel工作表对象
+        invoice_list: 原始发票列表
+
+    Returns:
+        List[Invoice]: 过滤后的发票列表（不包含已存在的发票）
+    """
+    filtered_invoices = []
+    for invoice in invoice_list:
+        if not check_invoice_exists_in_excel(ws, invoice):
+            filtered_invoices.append(invoice)
+        else:
+            logging.info(f'发票已存在，跳过: {invoice.code} - {invoice.date}')
+
+    return filtered_invoices

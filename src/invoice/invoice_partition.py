@@ -6,6 +6,7 @@ import logging
 import math
 import re
 from typing import List, Optional, Tuple
+import invoice_const
 
 from .text_utils import clean_garbled_chars, reconstruct_text_from_words
 from .regex_utils import DATE_REGEX_LOOSE
@@ -245,10 +246,10 @@ def filter_bottom_lines_from_grouped_data(
         line_text = ' '.join([w['text'] for w in line_words])
         # 检查是否包含"项目名称"关键词，通常还包含其他表头关键词
         if '项目名称' in line_text:
+            header_text_no_space = line_text.replace(' ', '')
             # 进一步验证：通常表头行还包含其他关键词
-            table_header_keywords = ['规格型号', '单位', '数量', '单价', '金额', '税率', '税额']
-            keyword_count = sum(1 for kw in table_header_keywords if kw in line_text)
-            if keyword_count >= 2:  # 至少包含2个表头关键词，确认为表头行
+            keyword_count = sum(1 for kw in invoice_const.TABLE_KEYWORDS if kw in header_text_no_space)
+            if keyword_count >= invoice_const.MIN_HEADER_KEYWORDS:  # 至少包含5个表头关键词，确认为表头行
                 project_name_lines.append((y, line_words))
     
     # 2. 识别所有包含"¥"的行
@@ -719,13 +720,12 @@ def find_table_top_line(lines: List[dict], words: List[dict], page_width: float)
     Returns:
         分界线对象，如果未找到返回None
     """
-    table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额']
-    
+
     # 找到表头关键词的Y坐标
     # 在pdfplumber中，top值越大越靠下，所以表头的top值应该较大
     table_header_y = None
     for word in words:
-        if any(kw in word['text'] for kw in table_keywords):
+        if any(kw in word['text'] for kw in invoice_const.TABLE_KEYWORDS):
             if table_header_y is None or word['top'] > table_header_y:
                 table_header_y = word['top']
     
@@ -785,17 +785,16 @@ def _determine_y_range_by_keywords(
     # 如果缺少分割线，尝试使用关键词确定Y范围
     if not words:
         return None
-    
+
     buyer_seller_keywords = ['购买方', '销售方', '名称', '统一社会信用代码']
-    table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额']
-    
+
     buyer_seller_y_coords = []
     table_y_coords = []
     
     for word in words:
         if any(kw in word['text'] for kw in buyer_seller_keywords):
             buyer_seller_y_coords.append(word['top'])
-        if any(kw in word['text'] for kw in table_keywords):
+        if any(kw in word['text'] for kw in invoice_const.TABLE_KEYWORDS):
             table_y_coords.append(word['top'])
     
     if buyer_seller_y_coords and table_y_coords:
@@ -1041,17 +1040,15 @@ def identify_region_boundaries(
     """
     # 1. 按行分组
     lines_dict = group_words_by_y(words, y_tolerance=3.0)
-    
+
     # 2. 识别关键行（基于关键词）
-    header_keywords = ['发票号码', '开票日期', '电子发票', '普通发票', '增值税专用发票']
     buyer_seller_keywords = ['购', '销', '购买方', '销售方']
-    table_keywords = ['项目名称', '规格型号', '单位', '数量', '单价', '金额']
-    
+
     # 查找购销方开始行（"购 销"行）
     header_bottom_keyword_y = find_keyword_line(lines_dict, buyer_seller_keywords)
     
     # 查找表格开始行（"项目名称"行）
-    table_top_keyword_y = find_keyword_line(lines_dict, table_keywords)
+    table_top_keyword_y = find_keyword_line(lines_dict, invoice_const.TABLE_KEYWORDS)
     
     logger.debug(f'基于行分组识别的边界: 购销方开始行Y={header_bottom_keyword_y}, 表格开始行Y={table_top_keyword_y}')
     

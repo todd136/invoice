@@ -68,8 +68,8 @@ class InvoiceProcessor:
         excel_file = build_file_path(self.base_path, 'invoice.xlsx')
         logging.info(f'开始将发票内容写入文件 {excel_file}...')
         try:
-            batch_export_to_excel(invoice_list, excel_file)
-            logging.info(f'成功导出 {len(invoice_list)} 张发票到 {excel_file}')
+            count = batch_export_to_excel(invoice_list, excel_file)
+            logging.info(f'成功导出 {count} 张发票到 {excel_file}')
         except Exception as e:
             logging.error(f'将发票写入文件 {excel_file} 失败: {e}')
             # 即使导出失败，也返回已解析的发票列表

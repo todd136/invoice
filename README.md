@@ -128,5 +128,5 @@ base_path = '/Volumes/share/temp/receipt'  # 修改为你的发票目录
 ## 参考
 
 本项目参考了 Go 版本的发票解析系统，使用 Python 和 pdfplumber 重新实现。
-
+python -m nuitka --standalone --onefile --mingw64 --noinclude-unittest-mode=nofollow --jobs=4 --lto=yes --output-filename=invoice main.py
 

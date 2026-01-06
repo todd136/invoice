@@ -21,7 +21,11 @@ def find_files(root_path: str) -> List[str]:
     """
     root = Path(root_path)
     pdf_files = list(root.glob('*.pdf'))
-    return [str(f) for f in pdf_files]
+    # pdf_files.sort(key=lambda x: x.stat().st_mtime)
+
+    invoice_list = [str(f) for f in pdf_files]
+    invoice_list.sort()
+    return invoice_list
 
 
 def build_file_path(base_path: str, file_name: str) -> str:

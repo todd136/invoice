@@ -6,6 +6,7 @@ import logging
 import re
 from typing import List, Optional, Tuple
 import pdfplumber
+import invoice_const
 
 from .invoice import Invoice, LineItem
 from .regex_utils import (
@@ -23,13 +24,6 @@ from .invoice_partition import (
 
 # 获取模块级别的日志记录器
 logger = logging.getLogger(__name__)
-
-# 表格解析相关常量
-TABLE_KEYWORDS = ['项目名称', '规格型号', '单位', '数量', '单价', '金额', '税率', '税额']
-MIN_HEADER_KEYWORDS = 3  # 表头行至少需要包含的关键词数量
-COLUMN_X_TOLERANCE = 10  # 列X坐标范围扩展容差（像素）
-WORD_DISTANCE_THRESHOLD = 30  # 拆分关键词的单词距离阈值（像素）
-SUMMARY_ROW_KEYWORDS = ['合计', '价税合计', '备注', '开票人']  # 合计行关键词
 
 def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
     """
@@ -346,6 +340,11 @@ def extract_buyer_name_from_words(buyer_words: List[dict]) -> str:
                 if idx > 0:
                     buyer = buyer[:idx].strip()
                     break
+        stop_keywords = '公司'
+        if stop_keywords in buyer:
+            idx = buyer.rindex(stop_keywords)
+            if idx > 0:
+                buyer = buyer[:idx+2].strip()
         # 排除税号（如果提取的内容是纯税号，则跳过）
         if buyer and not is_tax_id(buyer) and not re.match(r'^\d{12,}$', buyer):
             return buyer
@@ -486,21 +485,22 @@ def _find_header_row(sorted_lines: List[Tuple[float, List[dict]]], pdf_path: str
     row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
     
     # 查找表头关键词
-    keyword_count = sum(1 for kw in TABLE_KEYWORDS if kw in row_text)
-    if keyword_count >= MIN_HEADER_KEYWORDS:
+    header_text_no_space = row_text.replace(' ', '')
+    keyword_count = sum(1 for kw in invoice_const.TABLE_KEYWORDS if kw in header_text_no_space)
+    if keyword_count >= invoice_const.MIN_HEADER_KEYWORDS:
         logger.debug(f'{pdf_path}: 找到表头行，Y={y:.2f}, 内容: {row_text[:100]}')
         return y
     
     # 如果第一行不符合，尝试查找其他行（兼容处理）
-    logger.warning(f'{pdf_path}: 第一行不符合表头要求（包含{keyword_count}个关键词，需要至少{MIN_HEADER_KEYWORDS}个），尝试查找其他行')
+    logger.warning(f'{pdf_path}: 第一行不符合表头要求（包含{keyword_count}个关键词，需要至少{invoice_const.MIN_HEADER_KEYWORDS}个），尝试查找其他行')
     for y, line_words in sorted_lines[1:]:
         row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
-        keyword_count = sum(1 for kw in TABLE_KEYWORDS if kw in row_text)
-        if keyword_count >= MIN_HEADER_KEYWORDS:
+        keyword_count = sum(1 for kw in invoice_const.TABLE_KEYWORDS if kw in row_text)
+        if keyword_count >= invoice_const.MIN_HEADER_KEYWORDS:
             logger.debug(f'{pdf_path}: 找到表头行，Y={y:.2f}, 内容: {row_text[:100]}')
             return y
     
-    logger.warning(f'{pdf_path}: 未找到表头行（需要包含至少{MIN_HEADER_KEYWORDS}个表头关键词）')
+    logger.warning(f'{pdf_path}: 未找到表头行（需要包含至少{invoice_const.MIN_HEADER_KEYWORDS}个表头关键词）')
     # 打印前几行内容帮助调试
     for i, (y, line_words) in enumerate(sorted_lines[:5]):
         row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])])
@@ -536,14 +536,14 @@ def _match_keywords_to_words(header_line_words: List[dict], pdf_path: str = '') 
     # 方法1：直接匹配（关键词完整出现在单词中）
     for word in header_line_words:
         word_text = clean_garbled_chars(word['text'])
-        for keyword in TABLE_KEYWORDS:
+        for keyword in invoice_const.TABLE_KEYWORDS:
             if keyword in word_text:
                 if keyword not in keyword_words:
                     keyword_words[keyword] = []
                 keyword_words[keyword].append(word)
     
     # 方法2：处理被拆分的关键词（如"单位"被拆成"单"和"位"）
-    for keyword in TABLE_KEYWORDS:
+    for keyword in invoice_const.TABLE_KEYWORDS:
         if keyword in keyword_words:
             continue  # 已经找到完整匹配，跳过
         
@@ -573,7 +573,7 @@ def _match_keywords_to_words(header_line_words: List[dict], pdf_path: str = '') 
                         continue
                     # 检查X坐标是否相邻（距离小于阈值）
                     distance = abs(w2['x0'] - w1['x1'])
-                    if distance < WORD_DISTANCE_THRESHOLD:
+                    if distance < invoice_const.WORD_DISTANCE_THRESHOLD:
                         # 找到匹配的单词对
                         keyword_words[keyword] = [w1, w2]
                         logger.debug(f'{pdf_path}:   列"{keyword}": 通过字符匹配找到相邻单词对: "{clean_garbled_chars(w1["text"])}" (x0={w1["x0"]:.2f}) + "{clean_garbled_chars(w2["text"])}" (x0={w2["x0"]:.2f})')
@@ -612,9 +612,9 @@ def _calculate_column_ranges(keyword_words: dict, pdf_path: str = '') -> Tuple[d
         min_x0 = min(w['x0'] for w in words)
         max_x1 = max(w['x1'] for w in words)
         # 扩展范围：左右各扩展容差，以便匹配同一列的其他单词
-        col_x_ranges[keyword] = (min_x0 - COLUMN_X_TOLERANCE, max_x1 + COLUMN_X_TOLERANCE)
+        col_x_ranges[keyword] = (min_x0 - invoice_const.COLUMN_X_TOLERANCE, max_x1 + invoice_const.COLUMN_X_TOLERANCE)
         col_x_starts[keyword] = min_x0  # 记录首字x0坐标
-        logger.debug(f'{pdf_path}:   列"{keyword}": 包含{len(words)}个单词, x0范围=[{min_x0:.2f}, {max_x1:.2f}], 扩展后=[{min_x0-COLUMN_X_TOLERANCE:.2f}, {max_x1+COLUMN_X_TOLERANCE:.2f}]')
+        logger.debug(f'{pdf_path}:   列"{keyword}": 包含{len(words)}个单词, x0范围=[{min_x0:.2f}, {max_x1:.2f}], 扩展后=[{min_x0-invoice_const.COLUMN_X_TOLERANCE:.2f}, {max_x1+invoice_const.COLUMN_X_TOLERANCE:.2f}]')
     
     logger.debug(f'{pdf_path}: ================================================================================')
     
@@ -820,7 +820,7 @@ def _extract_item_from_row(
     
     # 检查是否是合计行或其他非明细行
     row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])]).lower()
-    if any(kw in row_text for kw in SUMMARY_ROW_KEYWORDS):
+    if any(kw in row_text for kw in invoice_const.SUMMARY_ROW_KEYWORDS):
         return None
     
     # 按X坐标排序单词
