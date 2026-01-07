@@ -58,8 +58,12 @@ def convert_date_to_path(date_str: str) -> str:
         ValueError: 日期格式不正确
     """
     try:
+        # 预处理：将兼容性字符替换为标准字符
+        normalized_date = (date_str
+                           .replace('⽉', '月')  # 兼容性月字符 -> 标准月字符
+                           .replace('⽇', '日')) # 兼容性日字符 -> 标准日字符
         # 解析日期：2025年11月1日
-        date_obj = datetime.strptime(date_str, '%Y年%m月%d日')
+        date_obj = datetime.strptime(normalized_date, '%Y年%m月%d日')
         # 格式化为路径：2025/11
         return date_obj.strftime('%Y/%m')
     except ValueError as e:
