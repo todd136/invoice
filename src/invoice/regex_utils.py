@@ -11,7 +11,7 @@ INVOICE_CODE_REGEX_LOOSE = re.compile(r'(?s)发票(?:号码|编码)?[^0-9]*(\d{1
 
 # 日期正则
 DATE_REGEX = re.compile(r'开票日期[：:\s]*(\d{4}年\d{1,2}月\d{1,2}日)')
-DATE_REGEX_LOOSE = re.compile(r'\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日')
+DATE_REGEX_LOOSE = re.compile(r'\d{4}\s*年\s*\d{1,2}\s*[月⽉]\s*\d{1,2}\s*[日⽇]')
 
 # 项目名称模式：*项目名称*费用名称
 PROJECT_NAME_REGEX = re.compile(r'\*[^*]+\*[^*]+')
