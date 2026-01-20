@@ -54,7 +54,7 @@ class InvoiceProcessor:
         # 2. 循环处理每张发票
         invoice_list = []
         for invoice_file in invoice_file_list:
-            invoice = self.process_single(invoice_file, True)
+            invoice = self.process_single(invoice_file, True, invoice_list)
             if invoice:
                 invoice_list.append(invoice)
         
@@ -63,7 +63,7 @@ class InvoiceProcessor:
             logging.error(f'在当前目录 {self.base_path} 中，找到 {len(invoice_file_list)} 张发票，'
                          f'但未能读取到发票信息，程序将退出...')
             return []
-        
+
         # 4. 将发票内容导出到Excel文件
         excel_file = build_file_path(self.base_path, 'invoice.xlsx')
         logging.info(f'开始将发票内容写入文件 {excel_file}...')
@@ -77,21 +77,32 @@ class InvoiceProcessor:
         logging.info('批量处理完成')
         return invoice_list
     
-    def process_single(self, pdf_path: str, move_file_after_parse: bool = True) -> Optional[Invoice]:
+    def process_single(self, pdf_path: str, move_file_after_parse: bool = True,
+                      existing_invoices: Optional[List[Invoice]] = None) -> Optional[Invoice]:
         """
         处理单张发票：解析、移动文件
-        
+
         Args:
             pdf_path: PDF文件路径
             move_file_after_parse: 解析成功后是否移动文件（默认True）
-        
+            existing_invoices: 已存在的发票列表，用于去重检查（可选）
+
         Returns:
             解析成功的Invoice对象，失败返回None
         """
         try:
             # 解析发票
             invoice = extract_invoice_by_table_and_text(pdf_path)
-            
+
+            # 检查是否与已存在的发票重复
+            if existing_invoices and invoice and invoice.code:
+                invoice_code = invoice.code.strip()
+                for existing_invoice in existing_invoices:
+                    if existing_invoice.code.strip() == invoice_code:
+                        logging.info(f'发票 {invoice_code} 已经存在 (文件名: {existing_invoice.name})，'
+                                   f'跳过 {pdf_path} 的处理和文件移动')
+                        return None
+
             # 将发票转移至日期路径下
             if move_file_after_parse and invoice.date:
                 try:
@@ -108,5 +119,4 @@ class InvoiceProcessor:
         except Exception as e:
             logging.error(f'读取发票 {pdf_path} 发生错误: {e}')
             return None
-
 
