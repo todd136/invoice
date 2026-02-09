@@ -33,8 +33,8 @@ jobs:
           --company-name="Todd Dev Studio" `
           --product-name="InvoiceParser" `
           --file-version=${{ github.ref_name }} `
-          --file-description="用于处理发票数据的自动化工具" 
-          --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved."
+          --file-description="用于处理发票数据的自动化工具" `
+          --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." `
           --output-filename=invoice `
           .\src\invoice\main.py
 
