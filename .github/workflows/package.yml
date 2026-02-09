@@ -17,13 +17,23 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # 换成你用的 Python 版本
+          python-version: '3.12'
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install nuitka zstandard
+
+      - name: Extract Clean Version
+        id: get_version
+        shell: bash
+        run: |
+          # 将 v1.0.0 转换为 1.0.0.0，去掉 v 并补全位数
+          RAW_VER=${{ github.ref_name }}
+          CLEAN_VER=$(echo ${RAW_VER#v} | sed 's/[^0-9.]//g')
+          # 确保至少有 3 位，Nuitka 喜欢 X.X.X.X 格式
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
 
       - name: Build EXE with Nuitka
         run: |
@@ -32,7 +42,7 @@ jobs:
           --windows-icon-from-ico=invoice_logo.ico `
           --company-name="Todd Dev Studio" `
           --product-name="InvoiceParser" `
-          --file-version=${{ github.ref_name }} `
+          --file-version=${{ steps.get_version.outputs.version }} `
           --file-description="用于处理发票数据的自动化工具" `
           --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." `
           --output-filename=invoice `
