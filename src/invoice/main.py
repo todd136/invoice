@@ -1,9 +1,8 @@
 """
 主程序入口
 """
-import sys
-import os
 import logging
+import sys
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -12,6 +11,7 @@ sys.path.insert(0, str(project_root))
 
 from src.invoice.invoice_processor import InvoiceProcessor
 from src.invoice.logger_config import setup_logger
+
 
 def get_executable_dir():
     """
@@ -31,10 +31,10 @@ def get_executable_dir():
 
 def main():
     """主函数"""
-    
+
     # 获取可执行文件所在目录（打包后）
     base_path = get_executable_dir()
-    
+
     # 或者使用硬编码路径
     # base_path = '/Volumes/share/temp/receipt'
 

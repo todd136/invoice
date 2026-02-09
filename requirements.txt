@@ -2,4 +2,4 @@
 pdfplumber==0.11.8
 
 # Excel 操作库 - 用于创建和写入 Excel 文件，导出发票数据
-openpyxl==3.1.2
+openpyxl==3.1.5
