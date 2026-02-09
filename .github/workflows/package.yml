@@ -25,6 +25,12 @@ jobs:
           pip install nuitka==2.8.9 zstandard
           pip install -r requirements.txt
 
+      - name: Cache Nuitka Downloads
+        uses: actions/cache@v3
+        with:
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: ${{ runner.os }}-nuitka-compiler
+
       - name: Extract Clean Version
         id: get_version
         shell: bash
@@ -38,6 +44,8 @@ jobs:
       - name: Build EXE with Nuitka
         run: |
           python -m nuitka --standalone --onefile --mingw64 `
+          --noinclude-unittest-mode=nofollow `
+          --assume-yes-for-downloads `
           --lto=yes `
           --windows-icon-from-ico=invoice_logo.ico `
           --company-name="Todd Dev Studio" `
