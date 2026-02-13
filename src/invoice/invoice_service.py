@@ -1290,8 +1290,21 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
     while j < len(items):
         next_item = items[j]
         
-        # 1. 遇到新的项目名称首行，停止合并
+        # 1. 遇到项目名称首行
         if _is_item_name_first_line(next_item):
+            # 特殊情况：当前行有金额/数量等但无项目名称，下一行是仅带名称（及税额）的首行 → 互补合并（名称行补到上一行）
+            merged_has_value = (
+                (merged_item.amount and merged_item.amount.strip()) or
+                (merged_item.quantity and merged_item.quantity.strip()) or
+                (merged_item.price and merged_item.price.strip())
+            )
+            merged_no_name = not (merged_item.item_name and merged_item.item_name.strip())
+            next_no_amount = not (next_item.amount and next_item.amount.strip())
+            if merged_has_value and merged_no_name and next_no_amount:
+                _merge_fields_from_item(merged_item, next_item, merge_spec=False)
+                logger.debug(f'{pdf_path}: 合并名称行到上一行(有金额无名称): 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}"')
+                j += 1
+                continue
             logger.debug(f'{pdf_path}: 行{j}是新的项目名称首行，停止当前商品合并')
             break
         
@@ -1496,8 +1509,12 @@ def can_merge_items(item1: LineItem, item2: LineItem) -> bool:
     Returns:
         如果可以合并返回True
     """
-    # 如果 item1 有金额，说明是完整记录，不需要合并
+    # 如果 item1 有金额且已有项目名称，说明是完整记录，不需要合并
     if item1.amount and item1.amount.strip():
+        # 例外：item1 有金额但无项目名称，item2 有项目名称（无金额）→ 互补合并
+        if not (item1.item_name and item1.item_name.strip()) and item2.item_name and item2.item_name.strip():
+            if not (item2.amount and item2.amount.strip()):
+                return True
         return False
     
     # 如果 item2 有金额，且 item1 没有金额，可以合并

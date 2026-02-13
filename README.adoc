@@ -128,4 +128,4 @@ base_path = '/Volumes/share/temp/receipt'  # 修改为你的发票目录
 ## 参考
 
 本项目参考了 Go 版本的发票解析系统，使用 Python 和 pdfplumber 重新实现。
-python -m nuitka --standalone --onefile --mingw64 --noinclude-unittest-mode=nofollow --lto=yes --jobs=4 --windows-icon-from-ico=invoice_logo.ico --company-name="Todd Dev Studio" --product-name="InvoiceParser" --file-version=1.0.0.0 --file-description="用于处理发票数据的自动化工具" --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." --output-filename=invoice .\src\invoice\main.py
+python -m nuitka --standalone --onefile --mingw64 --noinclude-unittest-mode=nofollow --noinclude-pytest-mode=nofollow --lto=yes --jobs=4 --windows-uac-admin --onefile-tempdir-spec="{CACHE_DIR}/todd_dev_studio/invoice" --windows-icon-from-ico=invoice_logo.ico --company-name="Todd Dev Studio" --product-name="InvoiceParser" --file-version=1.0.0.0 --product-version=1.0.0.0 --file-description="用于处理发票数据的自动化工具" --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." --output-filename=invoice .\src\invoice\main.py
