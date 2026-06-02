@@ -16,6 +16,18 @@ DATE_REGEX_LOOSE = re.compile(r'\d{4}\s*年\s*\d{1,2}\s*[月⽉]\s*\d{1,2}\s*[�
 # 项目名称模式：*项目名称*费用名称
 PROJECT_NAME_REGEX = re.compile(r'\*[^*]+\*[^*]+')
 
+# 项目名称须出现在文本开头（避免规格如 18mm*5y*2.5mm 误匹配）
+PROJECT_NAME_AT_START_REGEX = re.compile(r'^\*([^*]+)\*[^*]+')
+
+
+def has_project_name_at_start(text: str) -> bool:
+    """判断 *类别*商品名 是否出现在文本开头（类别须含中文，排除 18mm*5y*2.5mm 等规格）"""
+    compact = (text or '').strip().replace(' ', '')
+    m = PROJECT_NAME_AT_START_REGEX.match(compact)
+    if not m:
+        return False
+    return bool(re.search(r'[\u4e00-\u9fa5]', m.group(1)))
+
 # 税号模式（包含允许空格的版本，便于从原始文本提取）
 TAX_ID_PATTERNS = [
     re.compile(r'统一社会信用代码[：:\s]*([A-Za-z0-9]{15,20})'),

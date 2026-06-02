@@ -12,14 +12,50 @@ from .invoice import Invoice, LineItem
 from .regex_utils import (
     INVOICE_CODE_REGEX, INVOICE_CODE_REGEX_LOOSE, DATE_REGEX, DATE_REGEX_LOOSE,
     PROJECT_NAME_REGEX, TAX_ID_PATTERNS, TAX_ID_GLOBAL_REGEX, LONG_NUMBER_REGEX,
-    ROOM_NUMBER_REGEX, ROOM_ALPHA_REGEX, COMPANY_NAME_REGEX, normalize_alpha_num
+    ROOM_NUMBER_REGEX, ROOM_ALPHA_REGEX, COMPANY_NAME_REGEX, normalize_alpha_num,
+    has_project_name_at_start,
 )
 from .text_utils import clean_garbled_chars, reconstruct_text_from_words, normalize_text_whitespace
-from .number_utils import is_tax_id, score_candidate
+from .number_utils import (
+    is_tax_id,
+    score_candidate,
+    split_quantity_prefix_from_price,
+    amount_matches_qty_price,
+    pick_price_matching_amount,
+)
 from .invoice_partition import (
     partition_invoice_by_lines,
     print_partition_content,
     group_words_by_y
+)
+from .invoice_layout import (
+    find_primary_header_row_y,
+    should_skip_table_row,
+    filter_row_noise_words,
+    clean_extracted_item_name,
+    split_merged_detail_row,
+    strip_orphan_prefix_words,
+    extract_orphan_prefix_from_row,
+    is_orphan_suffix_fragment_text,
+    split_mixed_row_orphan_suffix,
+    peel_orphan_suffix_words_from_mixed_row,
+    extract_orphan_suffix_for_previous_row,
+    is_orphan_suffix_only_row,
+    extract_orphan_suffix_text,
+    split_orphan_suffix_fragments,
+    pick_orphan_suffix_for_parent,
+    is_buyer_seller_fragment_text,
+    OverlayItemDedupTracker,
+    resolve_layout_for_table_parse,
+    LayoutBounds,
+    is_segment_overlay_backward_copy,
+    is_segment_overlay_forward_inferior_copy,
+    is_overlay_orphan_suffix_text_duplicate,
+    orphan_suffix_owned_by_parent_y,
+    continuation_y_matches_predecessor,
+    suffix_completes_parent_name,
+    close_item_name_if_paren_only,
+    merge_item_name_suffix,
 )
 
 # 获取模块级别的日志记录器
@@ -52,6 +88,8 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
             first_page_header_words = None
             first_page_buyer_words = None
             first_page_table_words = None
+            first_page_layout = None
+            all_table_words = []
             
             # 存储所有页面的 raw_items（未合并的明细项）
             all_raw_items = []
@@ -73,7 +111,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
 
                 # 2. 使用分割线进行发票分区（对每页都进行分区）
                 logging.debug(f'开始使用分割线对第 {page_idx + 1} 页进行发票分区...')
-                header_words, buyer_words, seller_words, table_words = partition_invoice_by_lines(
+                header_words, buyer_words, seller_words, table_words, page_layout = partition_invoice_by_lines(
                     page, clean_words
                 )
                 
@@ -82,6 +120,7 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                     first_page_header_words = header_words
                     first_page_buyer_words = buyer_words
                     first_page_table_words = table_words
+                    first_page_layout = page_layout
                     # 只有在DEBUG日志级别时才打印各分区内容（调试用）
                     if logger.isEnabledFor(logging.DEBUG):
                         print_partition_content(header_words, buyer_words, seller_words, table_words)
@@ -93,8 +132,9 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
 
                 # 从当前页面的 table_words 提取 raw_items（不进行跨行合并）
                 if table_words:
+                    all_table_words.extend(table_words)
                     page_raw_items = parse_line_items_from_words_raw(
-                        table_words, pdf_file_path, page_idx + 1
+                        table_words, pdf_file_path, page_idx + 1, layout_from_partition=page_layout
                     )
                     if page_raw_items:
                         all_raw_items.extend(page_raw_items)
@@ -123,8 +163,15 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                     col_x_starts = _extract_column_starts_from_table_words(
                         first_page_table_words, pdf_file_path
                     )
-                    # 对所有页面的 raw_items 进行跨行商品记录合并
-                    invoice.items = merge_split_line_items(all_raw_items, col_x_starts, pdf_file_path)
+                    merge_lines_dict = group_words_by_y(all_table_words, y_tolerance=3.0)
+                    merge_layout = resolve_layout_for_table_parse(
+                        merge_lines_dict, first_page_layout,
+                    )
+                    invoice.items = merge_split_line_items(
+                        all_raw_items, col_x_starts, pdf_file_path,
+                        layout=merge_layout,
+                        lines_dict=merge_lines_dict,
+                    )
                 else:
                     # 如果没有第一页的 table_words，直接使用 raw_items（不进行跨行合并）
                     logger.warning(f'未能从第一页提取到表格数据，跳过跨行合并')
@@ -621,37 +668,50 @@ def _calculate_column_ranges(keyword_words: dict, pdf_path: str = '') -> Tuple[d
     return col_x_ranges, col_x_starts
 
 
-def _create_column_matcher(col_x_ranges: dict, sorted_line_words: List[dict]) -> callable:
-    """
-    创建列匹配函数
-    
-    Args:
-        col_x_ranges: {keyword: (x0, x1)} 列的X坐标范围
-        sorted_line_words: 当前行的单词列表（已按x0排序）
-        
-    Returns:
-        函数 find_word_in_column(keyword: str) -> Optional[str]
-    """
-    def find_word_in_column(keyword: str) -> Optional[str]:
-        """在指定列中查找单词，返回该列中所有匹配单词的合并文本"""
-        if keyword not in col_x_ranges:
-            return None
-        col_x0, col_x1 = col_x_ranges[keyword]
-        # 计算列的中心点（用于选择最匹配的列）
-        col_center = (col_x0 + col_x1) / 2
-        
-        # 查找X坐标在列范围内的所有单词
-        matched_words = []
-        for word in sorted_line_words:
-            word_center = (word['x0'] + word['x1']) / 2
+def _line_item_has_numeric_data(item: LineItem) -> bool:
+    """行内是否已解析出数量/单价/金额/税率/税额等数值字段"""
+    return bool(
+        (item.amount and item.amount.strip())
+        or (item.quantity and item.quantity.strip())
+        or (item.price and item.price.strip())
+        or (item.tax_rate and item.tax_rate.strip())
+        or (item.tax_amount and item.tax_amount.strip())
+    )
 
-            # 特殊处理：对于项目名称列
-            is_item_name_column = (keyword == '项目名称')
-            if is_item_name_column:
-                # 情况1：单词在项目名称列左侧，且没有匹配到其他列
-                # （处理项目名称折行的情况）
-                if word_center < col_x0:
-                    # 检查该单词是否匹配到其他列
+
+def _match_words_in_column(
+    col_x_ranges: dict,
+    sorted_line_words: List[dict],
+    keyword: str,
+) -> List[dict]:
+    """返回指定列中匹配到的所有单词（按 x0 排序前）。"""
+    if keyword not in col_x_ranges:
+        return []
+    col_x0, col_x1 = col_x_ranges[keyword]
+    col_center = (col_x0 + col_x1) / 2
+
+    matched_words = []
+    for word in sorted_line_words:
+        word_center = (word['x0'] + word['x1']) / 2
+
+        is_item_name_column = (keyword == '项目名称')
+        if is_item_name_column:
+            if word_center < col_x0:
+                matched_other = False
+                for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                    if other_keyword == keyword:
+                        continue
+                    if other_x0 <= word_center <= other_x1:
+                        matched_other = True
+                        break
+                if not matched_other:
+                    matched_words.append(word)
+                    continue
+            elif word_center > col_x1:
+                spec_col_x0 = None
+                if '规格型号' in col_x_ranges:
+                    spec_col_x0, _ = col_x_ranges['规格型号']
+                if spec_col_x0 is None or word_center < spec_col_x0:
                     matched_other = False
                     for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
                         if other_keyword == keyword:
@@ -659,68 +719,108 @@ def _create_column_matcher(col_x_ranges: dict, sorted_line_words: List[dict]) ->
                         if other_x0 <= word_center <= other_x1:
                             matched_other = True
                             break
-
-                    # 如果没有匹配到其他列，则匹配到项目名称列
                     if not matched_other:
                         matched_words.append(word)
                         continue
 
-                # 情况2：单词在项目名称列右侧，但在规格型号列左侧
-                # 且没有匹配到其他列，则将其匹配到项目名称列（处理项目名称向右延伸的情况）
-                elif word_center > col_x1:
-                    # 获取规格型号列的x0（如果存在），作为右边界
-                    spec_col_x0 = None
-                    if '规格型号' in col_x_ranges:
-                        spec_col_x0, _ = col_x_ranges['规格型号']
+        if col_x0 <= word_center <= col_x1:
+            matched_other_columns = []
+            for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
+                if other_keyword == keyword:
+                    continue
+                if other_x0 <= word_center <= other_x1:
+                    other_col_center = (other_x0 + other_x1) / 2
+                    matched_other_columns.append((other_keyword, other_col_center))
 
-                    # 如果单词在规格型号列左侧（或规格型号列不存在），且没有匹配到其他列
-                    if spec_col_x0 is None or word_center < spec_col_x0:
-                        # 检查该单词是否匹配到其他列
+            if matched_other_columns:
+                current_distance = abs(word_center - col_center)
+                other_distances = [(kw, abs(word_center - oc)) for kw, oc in matched_other_columns]
+                min_other_distance = min(d for _, d in other_distances)
+                if current_distance > min_other_distance:
+                    continue
 
-                        matched_other = False
+            matched_words.append(word)
 
-                        for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
-                            if other_keyword == keyword:
-                                continue
-                            if other_x0 <= word_center <= other_x1:
-                                matched_other = True
-                                break
+    return matched_words
 
-                        # 如果没有匹配到其他列，则匹配到项目名称列
-                        if not matched_other:
-                            matched_words.append(word)
-                            continue
 
-            # 优先使用单词中心点判断，确保更精确的匹配
-            # 只有当中心点在列范围内时，才认为该单词属于该列
-            if col_x0 <= word_center <= col_x1:
-                # 检查该单词是否也匹配到其他列（避免跨列匹配）
-                matched_other_columns = []
-                for other_keyword, (other_x0, other_x1) in col_x_ranges.items():
-                    if other_keyword == keyword:
-                        continue
-                    if other_x0 <= word_center <= other_x1:
-                        other_col_center = (other_x0 + other_x1) / 2
-                        matched_other_columns.append((other_keyword, other_col_center))
-                
-                # 如果单词匹配到多个列，选择中心点最接近的列
-                if matched_other_columns:
-                    # 计算到当前列和其他列的距离
-                    current_distance = abs(word_center - col_center)
-                    other_distances = [(kw, abs(word_center - oc)) for kw, oc in matched_other_columns]
-                    min_other_distance = min(d for _, d in other_distances)
-                    
-                    # 如果当前列不是最接近的，跳过该单词
-                    if current_distance > min_other_distance:
-                        continue
-                
-                matched_words.append(word)
+def _column_value_candidates(
+    col_x_ranges: dict,
+    sorted_line_words: List[dict],
+    keyword: str,
+) -> List[str]:
+    """同列全部候选文本（按 x0 排序）。"""
+    words = _match_words_in_column(col_x_ranges, sorted_line_words, keyword)
+    words.sort(key=lambda w: w['x0'])
+    values = []
+    for word in words:
+        text = clean_garbled_chars(word['text']).strip()
+        if text:
+            values.append(text)
+    return values
+
+
+def _reconcile_unit_price(
+    item: LineItem,
+    col_x_ranges: dict,
+    sorted_numeric_words: List[dict],
+    pdf_path: str,
+    y: float,
+) -> None:
+    """叠印混排行按金额校正单价（数值列顺序可能与名称片段索引不一致）。"""
+    if not item.amount or not item.price:
+        return
+    candidates = _column_value_candidates(col_x_ranges, sorted_numeric_words, '单价')
+    price_candidates = [
+        c for c in candidates
+        if re.search(r'\d+\.\d+', c) and '%' not in c
+    ]
+    if len(price_candidates) <= 1:
+        return
+    if amount_matches_qty_price(item.quantity, item.price, item.amount):
+        return
+    picked = pick_price_matching_amount(
+        price_candidates, item.quantity, item.amount,
+    )
+    if (
+        picked
+        and picked != item.price
+        and amount_matches_qty_price(item.quantity, picked, item.amount)
+    ):
+        logger.debug(
+            f'{pdf_path}: 行Y={y:.2f} 按金额校正单价: '
+            f'"{item.price}" -> "{picked}"'
+        )
+        item.price = picked
+
+
+def _create_column_matcher(
+    col_x_ranges: dict,
+    sorted_line_words: List[dict],
+    value_index: Optional[int] = None,
+) -> callable:
+    """
+    创建列匹配函数
+
+    value_index: 叠印同行多商品垂直叠置时，取该列第 N 个匹配词（0-based）
+    """
+    def find_word_in_column(keyword: str) -> Optional[str]:
+        """在指定列中查找单词，返回该列中所有匹配单词的合并文本"""
+        if keyword not in col_x_ranges:
+            return None
+
+        matched_words = _match_words_in_column(col_x_ranges, sorted_line_words, keyword)
         
         if not matched_words:
             return None
-        
-        # 合并该列中的所有单词（按X坐标排序）
+
         matched_words.sort(key=lambda w: w['x0'])
+        if value_index is not None and len(matched_words) > 1:
+            if value_index < len(matched_words):
+                matched_words = [matched_words[value_index]]
+            else:
+                matched_words = [matched_words[-1]]
+
         result = ' '.join([clean_garbled_chars(w['text']).strip() for w in matched_words])
         return result.strip() if result.strip() else None
     
@@ -731,25 +831,29 @@ def _find_item_name(
     sorted_line_words: List[dict],
     col_x_ranges: dict,
     find_word_in_column: callable,
-    pdf_path: str = ''
+    pdf_path: str = '',
 ) -> str:
     """
     查找项目名称
     
     策略：
-    1. 优先在项目名称列中查找
-    2. 如果列中没找到，查找最左侧包含中文的单词
-    
-    Args:
-        sorted_line_words: 当前行的单词列表（已按x0排序）
-        col_x_ranges: 列的X坐标范围字典
-        find_word_in_column: 列匹配函数
-        pdf_path: PDF 文件路径（用于日志）
-        
-    Returns:
-        项目名称字符串
+    1. 片段内仅一个 *类别* 词时直接使用（叠印叠置行）
+    2. 优先在项目名称列中查找
+    3. 如果列中没找到，查找最左侧包含中文的单词
     """
     item_name = ''
+
+    name_hits = [
+        w for w in sorted_line_words
+        if has_project_name_at_start(clean_garbled_chars(w.get('text', '')))
+    ]
+    if len(name_hits) == 1:
+        single = clean_garbled_chars(name_hits[0]['text']).strip()
+        if '项目名称' in col_x_ranges:
+            col_name = find_word_in_column('项目名称') or ''
+            if col_name and len(col_name.replace(' ', '')) > len(single.replace(' ', '')):
+                return col_name.strip()
+        return single
     
     # 方法1：在项目名称列中查找
     if '项目名称' in col_x_ranges:
@@ -797,11 +901,58 @@ def _find_item_name(
     return item_name
 
 
+def _make_orphan_suffix_item(suffix_text: str, y: float, pdf_path: str = '') -> Optional[LineItem]:
+    """构造项目名称折行 suffix 明细项"""
+    if not suffix_text or not is_orphan_suffix_fragment_text(suffix_text):
+        return None
+    item = LineItem()
+    item.item_name = suffix_text
+    item.source_y = y
+    logger.debug(f'{pdf_path}: 行Y={y:.2f} 混排剥离续行: "{suffix_text}"')
+    return item
+
+
+def _last_incomplete_amount_item(items: List[LineItem]) -> Optional[LineItem]:
+    """返回列表中最近一条名称未闭合且有金额的明细"""
+    for it in reversed(items):
+        if not it.amount or not it.amount.strip():
+            continue
+        if _item_name_needs_continuation(it.item_name):
+            return it
+    return None
+
+
+def _should_merge_as_orphan_suffix(text: str) -> bool:
+    """短 suffix 用 orphan 逻辑；长规格描述行整段拼接到项目名称"""
+    compact = (text or '').replace(' ', '').strip()
+    if not compact or len(compact) > 15:
+        return False
+    return is_orphan_suffix_fragment_text(compact)
+
+
+def _merge_orphan_suffix_to_item(
+    merged_item: LineItem,
+    orphan_item: LineItem,
+    merge_spec: bool = True,
+) -> None:
+    """合并续行 suffix（混排一行多 suffix 时只取与 parent 匹配的一段）"""
+    picked = pick_orphan_suffix_for_parent(
+        merged_item.item_name or '', orphan_item.item_name or '',
+    )
+    if not picked:
+        return
+    merged_item.item_name = merge_item_name_suffix(
+        merged_item.item_name or '', picked,
+    )
+
+
 def _extract_item_from_row(
     y: float,
     line_words: List[dict],
     col_x_ranges: dict,
-    pdf_path: str = ''
+    pdf_path: str = '',
+    numeric_source_words: Optional[List[dict]] = None,
+    column_value_index: Optional[int] = None,
 ) -> Optional[LineItem]:
     """
     从单行数据中提取明细项
@@ -817,24 +968,49 @@ def _extract_item_from_row(
     """
     if not line_words:
         return None
+
+    name_words = strip_orphan_prefix_words(line_words)
+    if not name_words:
+        return None
+    if is_orphan_suffix_only_row(name_words):
+        suffix_text = extract_orphan_suffix_text(name_words)
+        if not suffix_text or is_buyer_seller_fragment_text(suffix_text):
+            return None
+        if DATE_REGEX_LOOSE.search(suffix_text):
+            return None
+        frags = split_orphan_suffix_fragments(suffix_text, name_words)
+        frag = frags[0] if frags else suffix_text
+        item = LineItem()
+        item.item_name = frag
+        item.source_y = y
+        logger.debug(
+            f'{pdf_path}: 行Y={y:.2f} 项目名称折行续行: "{frag}"'
+        )
+        return item
     
     # 检查是否是合计行或其他非明细行
-    row_text = ' '.join([w['text'] for w in sorted(line_words, key=lambda w: w['x0'])]).lower()
+    row_text = ' '.join([w['text'] for w in sorted(name_words, key=lambda w: w['x0'])]).lower()
     if any(kw in row_text for kw in invoice_const.SUMMARY_ROW_KEYWORDS):
         return None
     
     # 按X坐标排序单词
-    sorted_line_words = sorted(line_words, key=lambda w: w['x0'])
+    sorted_name_words = sorted(name_words, key=lambda w: w['x0'])
+    sorted_numeric_words = sorted(
+        (numeric_source_words if numeric_source_words is not None else name_words),
+        key=lambda w: w['x0'],
+    )
     
-    # 创建列匹配器
-    find_word_in_column = _create_column_matcher(col_x_ranges, sorted_line_words)
+    # 创建列匹配器（叠印混排行用整行单词 + value_index 取第 N 列值）
+    find_word_in_column = _create_column_matcher(
+        col_x_ranges, sorted_numeric_words, value_index=column_value_index,
+    )
     
     # 查找项目名称
-    item_name = _find_item_name(sorted_line_words, col_x_ranges, find_word_in_column, pdf_path)
+    item_name = _find_item_name(sorted_name_words, col_x_ranges, find_word_in_column, pdf_path)
     
     # 创建明细项
     item = LineItem()
-    item.item_name = item_name
+    item.item_name = clean_extracted_item_name(item_name)
     item.spec = find_word_in_column('规格型号') or ''
     item.unit = find_word_in_column('单位') or ''
     item.quantity = find_word_in_column('数量') or ''
@@ -842,13 +1018,36 @@ def _extract_item_from_row(
     item.amount = find_word_in_column('金额') or ''
     item.tax_rate = find_word_in_column('税率') or ''
     item.tax_amount = find_word_in_column('税额') or ''
+
+    if not item.item_name:
+        has_spec_only = bool(item.spec and item.spec.strip())
+        if not _line_item_has_numeric_data(item) and not has_spec_only:
+            return None
+    elif DATE_REGEX_LOOSE.search(item.item_name) and not PROJECT_NAME_REGEX.search(item.item_name):
+        return None
+
+    if not item.quantity.strip() and item.price and item.amount:
+        qty, fixed_price = split_quantity_prefix_from_price(item.price, item.amount)
+        if qty:
+            item.quantity = qty
+            item.price = fixed_price
+            logger.debug(
+                f'{pdf_path}: 行Y={y:.2f} 拆分粘连数量/单价: '
+                f'数量="{qty}", 单价="{fixed_price}"'
+            )
+
+    _reconcile_unit_price(item, col_x_ranges, sorted_numeric_words, pdf_path, y)
     
+    if _has_concatenated_column_values(item):
+        logger.debug(f'{pdf_path}: 行Y={y:.2f} 列字段含多个数值（串行），丢弃该解析结果')
+        return None
+
     # 如果这一行有任何字段，就保留（可能是明细行的一部分）
     if item.item_name or item.spec or item.unit or item.quantity or item.price or item.amount:
         # 打印明细数据行的x0坐标信息
         logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
         logger.debug(f'{pdf_path}: 明细数据行 (Y={y:.2f}) X坐标信息:')
-        for word in sorted_line_words:
+        for word in sorted_name_words:
             word_text = clean_garbled_chars(word['text'])
             # 判断该单词属于哪一列（与find_word_in_column逻辑保持一致）
             matched_columns = []
@@ -881,12 +1080,82 @@ def _extract_item_from_row(
         
         logger.debug(f'{pdf_path}: 解析结果: 项目名称="{item.item_name}", 金额="{item.amount}", 规格="{item.spec}", 单位="{item.unit}", 数量="{item.quantity}", 单价="{item.price}", 税率="{item.tax_rate}", 税额="{item.tax_amount}"')
         logger.debug(f'{pdf_path}: --------------------------------------------------------------------------------')
+        item.source_y = y
         return item
     
     return None
 
 
-def parse_line_items_from_words_raw(table_words: List[dict], pdf_path: str = '', page_num: int = 1) -> List[LineItem]:
+def _extract_items_from_table_row(
+    y: float,
+    line_words: List[dict],
+    col_x_ranges: dict,
+    pdf_path: str,
+    layout_for_parse,
+    dedup_tracker: OverlayItemDedupTracker,
+    lines_dict: Optional[dict] = None,
+    peel_for_previous: bool = False,
+) -> List[LineItem]:
+    """从表格行提取明细（支持叠印合并行拆分与去重）"""
+    line_words = filter_row_noise_words(line_words, col_x_ranges)
+    if not line_words:
+        return []
+
+    items: List[LineItem] = []
+
+    if peel_for_previous:
+        prev_suffix, working_words = extract_orphan_suffix_for_previous_row(
+            line_words, col_x_ranges, peel_for_previous=True,
+        )
+        if prev_suffix:
+            orphan = _make_orphan_suffix_item(prev_suffix, y, pdf_path)
+            if orphan:
+                items.append(orphan)
+    else:
+        working_words = line_words
+
+    name_words_check = strip_orphan_prefix_words(working_words)
+    if is_orphan_suffix_only_row(name_words_check):
+        suffix_text = extract_orphan_suffix_text(name_words_check)
+        for frag in split_orphan_suffix_fragments(suffix_text, name_words_check):
+            orphan = _make_orphan_suffix_item(frag, y, pdf_path)
+            if orphan:
+                items.append(orphan)
+        return items
+
+    segments = split_merged_detail_row(working_words)
+    multi_segment = len(segments) > 1
+    for si, segment_words in enumerate(segments):
+        if lines_dict and layout_for_parse:
+            if is_segment_overlay_backward_copy(
+                y, segment_words, lines_dict, layout_for_parse, col_x_ranges,
+            ):
+                continue
+            if is_segment_overlay_forward_inferior_copy(
+                y, segment_words, lines_dict, layout_for_parse, col_x_ranges,
+            ):
+                continue
+        item = _extract_item_from_row(
+            y,
+            segment_words,
+            col_x_ranges,
+            pdf_path,
+            numeric_source_words=working_words if multi_segment else None,
+            column_value_index=si if multi_segment else None,
+        )
+        if not item:
+            continue
+        if dedup_tracker.should_keep(item.item_name, item.amount, y, layout_for_parse):
+            items.append(item)
+    return items
+
+
+def parse_line_items_from_words_raw(
+    table_words: List[dict],
+    pdf_path: str = '',
+    page_num: int = 1,
+    layout_from_partition: Optional[LayoutBounds] = None,
+) -> List[LineItem]:
     """
     从表格区域的单词列表中解析明细行（返回原始明细项，不进行跨行合并）
     
@@ -910,8 +1179,12 @@ def parse_line_items_from_words_raw(table_words: List[dict], pdf_path: str = '',
 
     logger.debug(f'{pdf_path} 第{page_num}页: 表格共有 {len(sorted_lines)} 行')
 
-    # 找到表头行
-    header_row_y = _find_header_row(sorted_lines, pdf_path)
+    layout_for_parse = resolve_layout_for_table_parse(lines_dict, layout_from_partition)
+
+    # 找到表头行（叠印时优先主层表头）
+    header_row_y = find_primary_header_row_y(sorted_lines, layout_for_parse)
+    if header_row_y is None:
+        header_row_y = _find_header_row(sorted_lines, pdf_path)
     if header_row_y is None:
         logger.debug(f'{pdf_path} 第{page_num}页: 未找到表头行')
         return []
@@ -924,22 +1197,33 @@ def parse_line_items_from_words_raw(table_words: List[dict], pdf_path: str = '',
     # 遍历数据行（表头行之后的行），提取字段（不进行跨行合并）
     raw_items = []
     header_found = False
-    
+    dedup_tracker = OverlayItemDedupTracker(
+        overlay_y_offset=layout_for_parse.overlay_y_offset if layout_for_parse else None,
+    )
+
     for y, line_words in sorted_lines:
-        # 跳过表头行
         if y == header_row_y:
             header_found = True
             continue
         if not header_found:
             continue
-        
-        # 从当前行提取明细项
-        item = _extract_item_from_row(y, line_words, col_x_ranges, pdf_path)
-        if item:
-            raw_items.append(item)
-    
+
+        if should_skip_table_row(
+            y, line_words, header_row_y, layout_for_parse, col_x_ranges, lines_dict,
+        ):
+            continue
+
+        peel_for_previous = _last_incomplete_amount_item(raw_items) is not None
+        raw_items.extend(
+            _extract_items_from_table_row(
+                y, line_words, col_x_ranges, pdf_path, layout_for_parse, dedup_tracker,
+                lines_dict,
+                peel_for_previous=peel_for_previous,
+            )
+        )
+
     logger.debug(f'{pdf_path} 第{page_num}页: 提取到 {len(raw_items)} 条原始明细项（未合并）')
-    
+
     return raw_items
 
 
@@ -962,9 +1246,13 @@ def _extract_column_starts_from_table_words(table_words: List[dict], pdf_path: s
     # 将单词按行分组
     lines_dict = group_words_by_y(table_words, y_tolerance=3.0)
     sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
-    
+
+    layout_for_parse = resolve_layout_for_table_parse(lines_dict, None)
+
     # 找到表头行（通常是第一行或包含表头关键词的行）
-    header_row_y = _find_header_row(sorted_lines, pdf_path)
+    header_row_y = find_primary_header_row_y(sorted_lines, layout_for_parse)
+    if header_row_y is None:
+        header_row_y = _find_header_row(sorted_lines, pdf_path)
     if header_row_y is None:
         logger.warning(f'{pdf_path}: 未能找到表头行，无法提取列坐标信息')
         return {}
@@ -998,8 +1286,12 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
 
     logger.debug(f'{pdf_path}: 表格共有 {len(sorted_lines)} 行')
 
+    layout_for_parse = resolve_layout_for_table_parse(lines_dict, None)
+
     # 找到表头行
-    header_row_y = _find_header_row(sorted_lines, pdf_path)
+    header_row_y = find_primary_header_row_y(sorted_lines, layout_for_parse)
+    if header_row_y is None:
+        header_row_y = _find_header_row(sorted_lines, pdf_path)
     if header_row_y is None:
         return []
 
@@ -1011,22 +1303,36 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
     # 遍历数据行（表头行之后的行），提取字段
     raw_items = []
     header_found = False
-    
+    dedup_tracker = OverlayItemDedupTracker(
+        overlay_y_offset=layout_for_parse.overlay_y_offset if layout_for_parse else None,
+    )
+
     for y, line_words in sorted_lines:
-        # 跳过表头行
         if y == header_row_y:
             header_found = True
             continue
         if not header_found:
             continue
-        
-        # 从当前行提取明细项
-        item = _extract_item_from_row(y, line_words, col_x_ranges, pdf_path)
-        if item:
-            raw_items.append(item)
-    
-    # 合并跨行的商品记录
-    items = merge_split_line_items(raw_items, col_x_starts, pdf_path)
+
+        if should_skip_table_row(
+            y, line_words, header_row_y, layout_for_parse, col_x_ranges, lines_dict,
+        ):
+            continue
+
+        peel_for_previous = _last_incomplete_amount_item(raw_items) is not None
+        raw_items.extend(
+            _extract_items_from_table_row(
+                y, line_words, col_x_ranges, pdf_path, layout_for_parse, dedup_tracker,
+                lines_dict,
+                peel_for_previous=peel_for_previous,
+            )
+        )
+
+    items = merge_split_line_items(
+        raw_items, col_x_starts, pdf_path,
+        layout=layout_for_parse,
+        lines_dict=lines_dict,
+    )
 
     logging.info(f'{pdf_path}: 合并后共有 {len(items)} 条明细')
 
@@ -1034,6 +1340,109 @@ def parse_line_items_from_words(table_words: List[dict], pdf_path: str = '') -> 
         logger.warning(f'{pdf_path}: 处理了 {len(raw_items)} 行数据，但未能解析到任何商品明细')
 
     return items
+
+
+def _is_item_name_prefix_first_line(name: str) -> bool:
+    """是否为 *类别*商品名 首行前缀（后续常有规格折行）"""
+    if not name or not name.strip():
+        return False
+    compact = name.strip().replace(' ', '')
+    return bool(re.match(r'^\*[^*]+\*[^*]+', compact))
+
+
+def _parent_allows_name_continuation(
+    parent_item_name: Optional[str],
+    layout: Optional[LayoutBounds] = None,
+) -> bool:
+    """
+    上一行项目名称是否仍可能接折行。
+
+    - 叠印：仅括号未闭合时接续行（orphan suffix 易串到相邻商品，禁止 *类别* 首行泛化续接）
+    - 非叠印：另允许 *类别* 首行后接多行规格描述（如绿林工具发票）
+    """
+    if not parent_item_name or not parent_item_name.strip():
+        return False
+    if _item_name_needs_continuation(parent_item_name):
+        return True
+    if layout and layout.has_overlay:
+        return False
+    return _is_item_name_prefix_first_line(parent_item_name)
+
+
+def _item_name_needs_continuation(name: str) -> bool:
+    """项目名称是否未结束（括号未闭合等），需要折行续接"""
+    if not name or not name.strip():
+        return False
+    n = name.strip().replace(' ', '')
+    if n.count('（') > n.count('）'):
+        return True
+    if n.count('(') > n.count(')'):
+        return True
+    if re.search(r'[（(][^）)]*$', n):
+        return True
+    return False
+
+
+def _is_plausible_name_continuation_text(
+    text: str,
+    parent_item_name: Optional[str] = None,
+    layout: Optional[LayoutBounds] = None,
+) -> bool:
+    """判断文本是否像商品名折行续接（排除购销方噪声）"""
+    compact = text.strip().replace(' ', '')
+    if not compact:
+        return False
+    if is_buyer_seller_fragment_text(compact):
+        return False
+    if DATE_REGEX_LOOSE.search(compact):
+        return False
+    if compact.startswith('*') and PROJECT_NAME_REGEX.search(compact):
+        return False
+    if re.search(r'[）)]', compact):
+        if parent_item_name and _item_name_needs_continuation(parent_item_name):
+            return suffix_completes_parent_name(parent_item_name, compact)
+        if layout and layout.has_overlay:
+            return False
+        return True
+    if layout and layout.has_overlay:
+        return False
+    if parent_item_name and _is_item_name_prefix_first_line(parent_item_name):
+        if not _is_item_name_prefix_first_line(compact):
+            if re.search(r'[\u4e00-\u9fa5A-Za-z0-9]', compact):
+                return True
+    if parent_item_name and _item_name_needs_continuation(parent_item_name):
+        return len(compact) <= 8 and bool(re.search(r'[\u4e00-\u9fa5]', compact))
+    return False
+
+
+def _should_discard_unmerged_item(item: LineItem) -> bool:
+    """丢弃未能合并的噪声行（续行碎片、日期、购销方字等）"""
+    if item.amount and item.amount.strip():
+        return False
+    name = (item.item_name or '').strip().replace(' ', '')
+    if not name:
+        return True
+    if DATE_REGEX_LOOSE.search(name):
+        return True
+    if is_buyer_seller_fragment_text(name):
+        return True
+    if _is_item_name_first_line(item):
+        return False
+    if not name.startswith('*'):
+        return True
+    return True
+
+
+def _has_concatenated_column_values(item: LineItem) -> bool:
+    """列字段是否串了多个数值（叠印同行多商品未拆开）"""
+    for value in (item.amount, item.price, item.quantity, item.tax_amount, item.unit, item.tax_rate):
+        if not value or ' ' not in value.strip():
+            continue
+        tokens = value.strip().split()
+        numeric = [t for t in tokens if re.match(r'^[\d.]+%?$', t)]
+        if len(numeric) >= 2:
+            return True
+    return False
 
 
 def _is_item_name_first_line(item: LineItem) -> bool:
@@ -1054,18 +1463,17 @@ def _is_item_name_first_line(item: LineItem) -> bool:
     
     item_name = item.item_name.strip()
     
-    # 检查是否以 * 开头（允许前导空格）
-    # 确保 * 在开头，而不是在中间（避免误匹配如 "胶 18mm*5y*2.5mm" 中的 "*5y*2.5mm"）
-    if not item_name.startswith('*'):
-        return False
-    
-    # 检查是否匹配 *商品名称* 格式（* 必须在开头）
-    # 使用 ^\s*\* 确保从开头匹配，而不是 search（可能在中间匹配）
-    first_line_pattern = re.compile(r'^\s*\*[^*]+\*[^*]+')
-    return bool(first_line_pattern.match(item_name))
+    return has_project_name_at_start(item_name)
 
 
-def _is_item_name_continuation_line(item: LineItem) -> bool:
+def _is_item_name_continuation_line(
+    item: LineItem,
+    parent_item_name: Optional[str] = None,
+    parent_source_y: Optional[float] = None,
+    layout: Optional[LayoutBounds] = None,
+    lines_dict: Optional[dict] = None,
+    predecessor_source_y: Optional[float] = None,
+) -> bool:
     """
     判断是否是项目名称的后续行（跨行）
     
@@ -1074,14 +1482,69 @@ def _is_item_name_continuation_line(item: LineItem) -> bool:
     2. 没有金额字段（有金额说明是完整商品）
     3. 不匹配首行格式（*商品名称*，且 * 必须在开头）
     4. 字段数量较少（主要是项目名称内容）
+    5. 上一行项目名称尚未结束（括号未闭合等）
     
     Args:
         item: 商品明细项
+        parent_item_name: 上一行已合并的项目名称
         
     Returns:
         如果是项目名称的后续行返回True
     """
     if not item.item_name or not item.item_name.strip():
+        return False
+
+    if parent_item_name is not None and not _parent_allows_name_continuation(
+        parent_item_name, layout,
+    ):
+        return False
+
+    if layout and layout.has_overlay and lines_dict and item.source_y is not None:
+        if is_overlay_orphan_suffix_text_duplicate(
+            item.source_y, item.item_name or '', lines_dict, layout,
+        ):
+            logger.debug(
+                '跨行合并: 跳过叠印续行副本 y=%.2f 文本="%s"',
+                item.source_y, (item.item_name or '')[:20],
+            )
+            return False
+
+    cont = item.item_name.strip()
+    picked = pick_orphan_suffix_for_parent(
+        parent_item_name or '', cont,
+    ) if parent_item_name else cont
+
+    if layout and layout.has_overlay and lines_dict and item.source_y is not None:
+        pred_y = predecessor_source_y if predecessor_source_y is not None else parent_source_y
+        y_ok = False
+        ref_ys = []
+        if pred_y is not None:
+            ref_ys.append(pred_y)
+        if parent_source_y is not None and parent_source_y not in ref_ys:
+            ref_ys.append(parent_source_y)
+        for ref_y in ref_ys:
+            if orphan_suffix_owned_by_parent_y(
+                item.source_y, ref_y, picked, layout, lines_dict,
+            ):
+                y_ok = True
+                break
+        if not y_ok:
+            logger.debug(
+                '跨行合并: 续行 y=%.2f 不属于主行 y=%.2f 文本="%s"',
+                item.source_y, pred_y or parent_source_y or 0, picked[:20],
+            )
+            return False
+    elif predecessor_source_y is not None and item.source_y is not None:
+        if not continuation_y_matches_predecessor(
+            predecessor_source_y, item.source_y, layout, allow_cross_block=True,
+        ):
+            if not _parent_allows_name_continuation(parent_item_name or '', layout):
+                return False
+
+    if not _is_plausible_name_continuation_text(picked, parent_item_name, layout):
+        return False
+
+    if cont.startswith('*') and PROJECT_NAME_REGEX.search(cont):
         return False
     
     # 有金额说明是完整商品，不是跨行
@@ -1175,11 +1638,17 @@ def _is_single_field_line(item: LineItem) -> bool:
         1 if item.tax_amount and item.tax_amount.strip() else 0,
     ])
     
-    # 只有1个字段，且不是项目名称跨行（项目名称跨行已经单独处理）
-    return field_count == 1 and not _is_item_name_continuation_line(item)
+    # 只有1个字段，且不是新的项目名称首行
+    return field_count == 1 and not _is_item_name_first_line(item)
 
 
-def _is_generic_continuation_line(item: LineItem) -> bool:
+def _is_generic_continuation_line(
+    item: LineItem,
+    parent_item_name: Optional[str] = None,
+    parent_source_y: Optional[float] = None,
+    layout: Optional[LayoutBounds] = None,
+    lines_dict: Optional[dict] = None,
+) -> bool:
     """
     通用的折行判断（保留原有逻辑）
     
@@ -1188,6 +1657,7 @@ def _is_generic_continuation_line(item: LineItem) -> bool:
     
     Args:
         item: 商品明细项
+        parent_item_name: 上一行已合并的项目名称
         
     Returns:
         如果是通用折行返回True
@@ -1199,6 +1669,36 @@ def _is_generic_continuation_line(item: LineItem) -> bool:
     # 有项目名称首行格式，不是通用折行（已经单独处理）
     if _is_item_name_first_line(item):
         return False
+
+    if parent_item_name is not None and not _parent_allows_name_continuation(
+        parent_item_name, layout,
+    ):
+        return False
+
+    if item.item_name and not _is_plausible_name_continuation_text(
+        item.item_name.strip(), parent_item_name, layout,
+    ):
+        return False
+
+    if layout and layout.has_overlay and lines_dict and item.source_y is not None:
+        if is_overlay_orphan_suffix_text_duplicate(
+            item.source_y, item.item_name or '', lines_dict, layout,
+        ):
+            return False
+        ref_y = parent_source_y
+        if ref_y is not None and not orphan_suffix_owned_by_parent_y(
+            item.source_y,
+            ref_y,
+            item.item_name or '',
+            layout,
+            lines_dict,
+        ):
+            return False
+
+    if item.item_name:
+        cont = item.item_name.strip().replace(' ', '')
+        if _is_item_name_prefix_first_line(cont):
+            return False
     
     # 统计非空字段数量
     field_count = sum([
@@ -1261,7 +1761,14 @@ def _merge_fields_from_item(merged_item: LineItem, next_item: LineItem, merge_sp
 
 
 
-def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: List[LineItem], pdf_path: str = '') -> int:
+def _merge_continuation_lines(
+    merged_item: LineItem,
+    start_index: int,
+    items: List[LineItem],
+    pdf_path: str = '',
+    layout: Optional[LayoutBounds] = None,
+    lines_dict: Optional[dict] = None,
+) -> int:
     """
     统一的合并循环逻辑：从start_index开始向后扫描，合并跨行和折行的记录
     
@@ -1287,6 +1794,7 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
         合并结束的位置（下一个要处理的索引）
     """
     j = start_index + 1
+    last_merged_y = merged_item.source_y
     while j < len(items):
         next_item = items[j]
         
@@ -1325,9 +1833,20 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
                 break
         
         # 3. 检查是否是项目名称的跨行
-        if _is_item_name_continuation_line(next_item):
-            _merge_fields_from_item(merged_item, next_item, merge_spec=True)
+        if _is_item_name_continuation_line(
+            next_item,
+            merged_item.item_name,
+            merged_item.source_y,
+            layout,
+            lines_dict,
+            predecessor_source_y=last_merged_y,
+        ):
+            if _should_merge_as_orphan_suffix(next_item.item_name or ''):
+                _merge_orphan_suffix_to_item(merged_item, next_item, merge_spec=True)
+            else:
+                _merge_fields_from_item(merged_item, next_item, merge_spec=True)
             logger.debug(f'{pdf_path}: 合并项目名称跨行: 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+            last_merged_y = next_item.source_y
             j += 1
             continue
         
@@ -1335,18 +1854,61 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
         if _is_spec_continuation_line(next_item):
             _merge_fields_from_item(merged_item, next_item, merge_spec=True)
             logger.debug(f'{pdf_path}: 合并规格型号折行: 行{start_index} + 行{j}, 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
+            last_merged_y = next_item.source_y
             j += 1
             continue
         
         # 5. 检查是否是单个字段行（如只有单价、只有数量等）
         if _is_single_field_line(next_item):
+            if not _parent_allows_name_continuation(merged_item.item_name, layout):
+                logger.debug(
+                    f'{pdf_path}: 行{j} 单字段行但主行名称已闭合，停止当前商品合并'
+                )
+                break
+            if next_item.item_name and not _is_plausible_name_continuation_text(
+                next_item.item_name.strip(), merged_item.item_name, layout,
+            ):
+                logger.debug(
+                    f'{pdf_path}: 行{j} 单字段行文本不像续行，停止当前商品合并'
+                )
+                break
+            if layout and layout.has_overlay and lines_dict and next_item.source_y is not None:
+                picked = pick_orphan_suffix_for_parent(
+                    merged_item.item_name or '', next_item.item_name or '',
+                )
+                if not picked:
+                    logger.debug(
+                        f'{pdf_path}: 行{j} orphan suffix 与主行不匹配，停止当前商品合并'
+                    )
+                    break
+                y_ok = False
+                for ref_y in (last_merged_y, merged_item.source_y):
+                    if ref_y is None:
+                        continue
+                    if orphan_suffix_owned_by_parent_y(
+                        next_item.source_y, ref_y, picked, layout, lines_dict,
+                    ):
+                        y_ok = True
+                        break
+                if not y_ok:
+                    logger.debug(
+                        f'{pdf_path}: 行{j} orphan suffix Y 不匹配主行，停止当前商品合并'
+                    )
+                    break
             _merge_fields_from_item(merged_item, next_item, merge_spec=False)
             logger.debug(f'{pdf_path}: 合并单个字段行: 行{start_index} + 行{j}, 继续检查后续是否有项目名称跨行')
+            last_merged_y = next_item.source_y
             j += 1
             continue
         
         # 6. 通用折行判断（保留原有逻辑，作为兜底）
-        if _is_generic_continuation_line(next_item):
+        if _is_generic_continuation_line(
+            next_item,
+            merged_item.item_name,
+            merged_item.source_y,
+            layout,
+            lines_dict,
+        ):
             _merge_fields_from_item(merged_item, next_item, merge_spec=True)
             logger.debug(f'{pdf_path}: 合并通用折行字段: 行{start_index} + 行{j}, 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 规格="{merged_item.spec[:50] if merged_item.spec else ""}"')
             j += 1
@@ -1365,13 +1927,133 @@ def _merge_continuation_lines(merged_item: LineItem, start_index: int, items: Li
             j += 1
             continue
         
-        # 8. 不是需要合并的行，停止
+        # 8. 不是需要合并的行；若主行仍缺续行则跳过该 orphan 继续向后找
+        if (
+            _item_name_needs_continuation(merged_item.item_name)
+            and next_item.item_name
+            and not (next_item.amount and next_item.amount.strip())
+            and not _is_item_name_first_line(next_item)
+        ):
+            logger.debug(
+                f'{pdf_path}: 行{j} 续行不匹配主行 y={merged_item.source_y}, 跳过继续查找'
+            )
+            j += 1
+            continue
         break
     
     return j
 
 
-def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: str = '') -> List[LineItem]:
+def _is_orphan_suffix_candidate(item: LineItem) -> bool:
+    """是否为未合并的项目名称折行续行候选"""
+    if item.amount and item.amount.strip():
+        return False
+    if not item.item_name or not item.item_name.strip():
+        return False
+    if _is_item_name_first_line(item):
+        return False
+    return True
+
+
+def _attach_orphan_suffixes_by_y(
+    merged_items: List[LineItem],
+    raw_items: List[LineItem],
+    layout: Optional[LayoutBounds],
+    lines_dict: Optional[dict],
+    pdf_path: str = '',
+) -> None:
+    """
+    按 Y 坐标将折行 suffix 挂接到名称未闭合的主层商品。
+
+    叠印 PDF 中主层续行位置常被 B 套商品占用，suffix 仅出现在 overlay_y + line_gap 处。
+    """
+    if not lines_dict:
+        return
+
+    orphans = sorted(
+        [
+            it for it in raw_items
+            if _is_orphan_suffix_candidate(it) and it.source_y is not None
+        ],
+        key=lambda it: it.source_y or 0,
+    )
+    if not orphans:
+        return
+
+    used_ids: set = set()
+    frag_index_by_y: dict = {}
+
+    for item in merged_items:
+        if not item.item_name or not _item_name_needs_continuation(item.item_name):
+            continue
+        if item.source_y is None:
+            continue
+
+        best: Optional[LineItem] = None
+        best_suffix = ''
+        for orphan in orphans:
+            if id(orphan) in used_ids:
+                continue
+            frags = split_orphan_suffix_fragments(orphan.item_name or '')
+            idx = frag_index_by_y.get(orphan.source_y, 0)
+            suffix = ''
+            if idx < len(frags):
+                candidate = frags[idx]
+                if suffix_completes_parent_name(item.item_name, candidate):
+                    suffix = candidate
+            if not suffix:
+                suffix = pick_orphan_suffix_for_parent(
+                    item.item_name, orphan.item_name or '',
+                )
+            if not suffix or not suffix_completes_parent_name(item.item_name, suffix):
+                continue
+            if not _is_plausible_name_continuation_text(
+                suffix, item.item_name, layout,
+            ):
+                continue
+            if not orphan_suffix_owned_by_parent_y(
+                orphan.source_y,
+                item.source_y,
+                suffix,
+                layout,
+                lines_dict,
+            ):
+                continue
+            combined = merge_item_name_suffix(item.item_name, suffix)
+            if _item_name_needs_continuation(combined):
+                continue
+            best = orphan
+            best_suffix = suffix
+            break
+
+        if best is None or not best_suffix:
+            continue
+
+        frags = split_orphan_suffix_fragments(best.item_name or '')
+        idx = frag_index_by_y.get(best.source_y, 0)
+        if idx < len(frags) - 1:
+            frag_index_by_y[best.source_y] = idx + 1
+        else:
+            used_ids.add(id(best))
+            frag_index_by_y[best.source_y] = len(frags)
+
+        item.item_name = merge_item_name_suffix(item.item_name, best_suffix)
+        logger.debug(
+            '%s: Y 坐标挂接续行 y=%.2f -> 主行 y=%.2f, 项目名称="%s"',
+            pdf_path,
+            best.source_y,
+            item.source_y,
+            item.item_name[:50],
+        )
+
+
+def merge_split_line_items(
+    items: List[LineItem],
+    col_x_starts: dict,
+    pdf_path: str = '',
+    layout: Optional[LayoutBounds] = None,
+    lines_dict: Optional[dict] = None,
+) -> List[LineItem]:
     """
     合并跨行的商品记录
     
@@ -1402,9 +2084,19 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
     actual_item_count = len(items_with_amount)
 
     logger.debug(f'{pdf_path}: 初始解析 {len(items)} 条记录，其中 {actual_item_count} 条有金额字段')
-    
-    # 如果实际商品数量等于初始记录数，说明没有跨行问题
-    if actual_item_count == len(items):
+
+    needs_name_merge = any(
+        _item_name_needs_continuation(item.item_name)
+        for item in items
+        if item.item_name
+    )
+    has_continuation_rows = any(
+        item.item_name and item.item_name.strip()
+        and not (item.amount and item.amount.strip())
+        and not _is_item_name_first_line(item)
+        for item in items
+    )
+    if actual_item_count == len(items) and not needs_name_merge and not has_continuation_rows:
         return items
     
     # 合并逻辑：遍历items，合并跨行的记录
@@ -1425,9 +2117,12 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
             merged_item.amount = current_item.amount or ''
             merged_item.tax_rate = current_item.tax_rate or ''
             merged_item.tax_amount = current_item.tax_amount or ''
+            merged_item.source_y = current_item.source_y
             
             # 使用统一合并循环
-            j = _merge_continuation_lines(merged_item, i, items, pdf_path)
+            j = _merge_continuation_lines(
+                merged_item, i, items, pdf_path, layout, lines_dict,
+            )
             
             merged_items.append(merged_item)
             start_row = i
@@ -1439,9 +2134,13 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
         # 情况2：当前记录有金额，说明是一个完整的商品记录
         if current_item.amount and current_item.amount.strip():
             merged_item = current_item
+            if merged_item.source_y is None:
+                merged_item.source_y = current_item.source_y
             
             # 使用统一合并循环
-            j = _merge_continuation_lines(merged_item, i, items, pdf_path)
+            j = _merge_continuation_lines(
+                merged_item, i, items, pdf_path, layout, lines_dict,
+            )
             
             merged_items.append(merged_item)
             i = j
@@ -1451,7 +2150,9 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
         merged_item = current_item
         
         # 使用统一合并循环（如果merged_item无金额，遇到有金额的行会自动合并）
-        j = _merge_continuation_lines(merged_item, i, items, pdf_path)
+        j = _merge_continuation_lines(
+            merged_item, i, items, pdf_path, layout, lines_dict,
+        )
         
         # 判断是否成功合并（有金额或其他有效字段）
         has_amount = merged_item.amount and merged_item.amount.strip()
@@ -1465,11 +2166,25 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
             end_row = j - 1
             logger.debug(f'{pdf_path}: 合并记录 行{start_row} 到 行{end_row}: 项目名称="{merged_item.item_name[:50] if merged_item.item_name else ""}", 金额="{merged_item.amount}"')
         elif merged_item.item_name:
-            # 无法合并但有项目名称，保留当前记录
-            merged_items.append(merged_item)
-            logger.debug(f'{pdf_path}: 保留无法合并的记录: 行{i}, 项目名称="{merged_item.item_name[:50]}"')
+            if not _should_discard_unmerged_item(merged_item):
+                merged_items.append(merged_item)
+                logger.debug(
+                    f'{pdf_path}: 保留无法合并的记录: 行{i}, '
+                    f'项目名称="{merged_item.item_name[:50]}"'
+                )
+            else:
+                logger.debug(
+                    f'{pdf_path}: 丢弃无法合并的噪声行: 行{i}, '
+                    f'项目名称="{merged_item.item_name[:50]}"'
+                )
         
         i = j
+
+    _attach_orphan_suffixes_by_y(merged_items, items, layout, lines_dict, pdf_path)
+
+    for item in merged_items:
+        if item.item_name:
+            item.item_name = close_item_name_if_paren_only(item.item_name)
     
     # 合并完成后，去掉所有字段中的空格
     for item in merged_items:
@@ -1490,7 +2205,17 @@ def merge_split_line_items(items: List[LineItem], col_x_starts: dict, pdf_path: 
         if item.tax_amount:
             item.tax_amount = item.tax_amount.replace(' ', '')
     
-    return merged_items
+    final_items = []
+    for item in merged_items:
+        if item.amount and item.amount.strip():
+            final_items.append(item)
+        else:
+            logger.debug(
+                f'{pdf_path}: 丢弃无金额的合并结果: '
+                f'项目名称="{item.item_name[:50] if item.item_name else ""}"'
+            )
+    
+    return final_items
 
 
 def can_merge_items(item1: LineItem, item2: LineItem) -> bool:

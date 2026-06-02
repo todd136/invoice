@@ -2,7 +2,7 @@
 发票数据模型定义
 """
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -16,6 +16,7 @@ class LineItem:
     amount: str = ""  # 金额
     tax_rate: str = ""  # 税率
     tax_amount: str = ""  # 税额
+    source_y: Optional[float] = None  # PDF 行 Y 坐标（跨行合并/叠印判断）
 
 
 @dataclass

@@ -1,131 +1,569 @@
-# 发票解析系统 (Python 版本)
+= 发票解析系统 (Python)
 
-基于 pdfplumber 的发票 PDF 解析系统，从 PDF 格式的发票文件中提取结构化数据，并将结果导出到 Excel 文件。
+基于 pdfplumber 的发票 PDF 解析系统：从电子发票 PDF 中提取结构化数据，按开票日期归档文件，并批量导出 Excel。
 
-## 项目结构
+== 项目结构
 
-```
+[source]
+----
 invoice/
-├── src/
-│   └── invoice/
-│       ├── __init__.py
-│       ├── main.py                    # 程序入口
-│       ├── invoice.py                 # 数据模型
-│       ├── invoice_service.py         # 发票解析主服务
-│       ├── file_service.py           # 文件操作（查找、移动）
-│       ├── excel_service.py          # Excel 导出服务
-│       ├── text_utils.py             # 文本处理工具
-│       ├── regex_utils.py            # 正则表达式工具
-│       └── number_utils.py           # 数字处理工具
-├── requirements.txt                   # 依赖包
-└── README.md
-```
+├── src/invoice/
+│   ├── main.py                 # 程序入口
+│   ├── invoice_processor.py    # 批量处理编排（扫描→解析→移动→导出）
+│   ├── invoice_service.py      # 解析主服务：基本信息、列坐标、明细提取与跨行合并
+│   ├── invoice_partition.py    # 页面分区：发票头 / 购销方 / 表格（基于线条与关键词）
+│   ├── invoice_layout.py       # 叠印检测、主层选择、噪声过滤、续行/孤儿片段处理
+│   ├── invoice.py              # 数据模型 Invoice / LineItem
+│   ├── invoice_const.py        # 表头关键词、合计行关键词等常量
+│   ├── regex_utils.py          # 正则常量；has_project_name_at_start() 等
+│   ├── text_utils.py           # 乱码清理、文本重组
+│   ├── number_utils.py         # 税号校验、数量/单价粘连拆分、金额核对
+│   ├── file_service.py         # PDF 扫描、按日期移动
+│   ├── excel_service.py        # Excel 导出
+│   └── logger_config.py        # 日志配置
+├── invoice_template1.md        # 模版 1：普通/专票（当前主要适配）
+├── invoice_template2.md        # 模版 2：税务机关代开（待扩展）
+├── requirements.txt
+├── build.bat                   # Windows Nuitka 打包
+├── logo.ico
+└── README.adoc
+----
 
-## 安装依赖
+== 运行方式
 
-```bash
+=== 安装依赖
+
+[source,bash]
+----
 pip install -r requirements.txt
-```
+----
 
-主要依赖：
-- `pdfplumber`: PDF 文本和表格提取
-- `openpyxl`: Excel 文件操作
+主要依赖：`pdfplumber`（PDF 文本提取）、`openpyxl`（Excel 导出）。
 
-## 使用方法
+=== 开发环境运行
 
-### 基本使用
+[source,bash]
+----
+# 在项目根目录
+PYTHONPATH=src:src/invoice python3 src/invoice/main.py
+----
 
-```bash
-cd src/invoice
-python main.py
-```
+在 `main.py` 中修改 `base_path` 为发票 PDF 所在目录（默认 `/Volumes/share/temp/receipt`）。
 
-### 修改配置
+=== 日志
 
-在 `main.py` 中修改 `base_path` 变量，指定发票文件所在目录：
+* 全局级别：`INFO`
+* `src.invoice` 模块：`DEBUG`（含明细行 X 坐标、合并决策等）
+* 日志文件：`{base_path}/logs/app_{日期}.log`
 
-```python
-base_path = '/Volumes/share/temp/receipt'  # 修改为你的发票目录
-```
+== 端到端处理流程
 
-## 处理流程
+[source]
+----
+扫描 PDF → 逐页提取单词 → 页面分区 → 基本信息 → 原始明细行 → 跨行合并 → 归档 → Excel
+----
 
-```
-扫描PDF文件 → 解析发票信息 → 按日期组织文件 → 批量导出到Excel
-```
+. *扫描*：`file_service.find_files()` 递归查找 `.pdf`
+. *解析*：`extract_invoice_by_table_and_text()`（`invoice_service.py`）
+.. 过滤红色印章文字
+.. 每页 `partition_invoice_by_lines()` 分为头/购/销/表
+.. 第一页提取发票号码、日期、购买方、类型
+.. 各页 `parse_line_items_from_words_raw()` 提取原始明细
+.. 全页合并后 `merge_split_line_items()` 做跨行商品合并
+. *归档*：按开票日期移动到 `YYYY/MM/`
+. *导出*：`{base_path}/invoice.xlsx`
 
-### 详细流程
+== 解析架构（模块职责）
 
-1. **扫描PDF文件**
-- 在指定目录下查找所有 `.pdf` 文件
+=== invoice_partition.py — 页面分区
 
-2. **解析发票信息**
-- 使用 `pdfplumber` 提取文本和表格
-- 过滤印章文字（红色）
-- 提取基本信息：发票号码、开票日期、购买方、税号、发票类型
-- 解析商品明细：项目名称、规格、单位、数量、单价、金额、税率、税额
+将单页 PDF 单词流划分为四个区域：
 
-3. **按日期组织文件**
-- 将解析成功的发票文件移动到 `YYYY/MM` 目录结构下
+[cols="1,2,3"]
+|===
+| 区域 | 判定依据 | 用途
 
-4. **批量导出到Excel**
-- 将所有发票数据写入 `invoice.xlsx` 文件
-- 支持追加模式（如果文件已存在）
+| 发票头
+| 顶部水平线 + 「开票日期」等关键词
+| 号码、日期、类型
 
-## 输出文件
+| 购买方
+| 开票日期行与表头行之间，页面左半或垂直线分界
+| 名称、税号
 
-- **Excel 文件**: `{base_path}/invoice.xlsx`
-- 包含所有发票的明细数据
-- 表头：发票号码、开票日期、购买方、项目名称、规格、单位、数量、单价、金额、税率、税额、发票文件名、录入时间、购买方统一社会信用代码/纳税人识别号、发票类型
+| 销售方
+| 同上，右半
+| 当前解析未深度使用
 
-- **日志文件**: `{base_path}/logs/app_{日期}.log`
-- 记录处理过程和错误信息
+| 表格
+| 「项目名称」表头行以下、合计/备注/开票人之前
+| 商品明细
+|===
 
-## 核心功能
+分区后调用 `invoice_layout.apply_layout_preprocessing()` / `compute_layout_bounds()`，产出 `LayoutBounds`（是否叠印、主表头 Y、叠印 Y 偏移等），供后续明细解析使用。
 
-### 1. PDF 文本提取
-- 使用 `pdfplumber` 提取文本和表格
-- 自动过滤红色印章文字
-- 支持文本流重组，解决乱序问题
+=== invoice_layout.py — 叠印与噪声
 
-### 2. 字段识别
-- **发票号码**: 12-20 位数字
-- **开票日期**: YYYY年MM月DD日 格式
-- **购买方名称**: 支持公司名称、房间号等多种格式
-- **购买方税号**: 18位统一社会信用代码验证
-- **发票类型**: 普通发票/增值税专用发票
+* *叠印检测*：同页出现两套表头/明细（Y 坐标相差较大且内容重复）
+* *主层选择*：保留 Y 较小（视觉上靠上）的一套作为主层
+* *多页模版*：物理一页内顺序出现「第1页 + 第2页」内容（页码递增）→ **不是叠印**，不做叠印去重
+* *行/词过滤*：`should_skip_table_row()`、`filter_row_noise_words()` 去掉购销方碎片、叠印副本行
+* *续行片段*：`is_orphan_suffix_only_row()`、`pick_orphan_suffix_for_parent()`、`merge_item_name_suffix()` 处理括号折行（如 `中南海(软` + `精品)`）
 
-### 3. 商品明细解析
-- 自动识别表头行
-- 解析表格中的明细数据
-- 支持跨行数据合并
+=== invoice_service.py — 明细解析与合并
 
-### 4. 文件管理
-- 按日期自动组织文件目录
-- 支持文件移动和重命名
+==== 阶段 1：列坐标
 
-## 注意事项
+表头行匹配 `TABLE_KEYWORDS`（项目名称、规格型号、单位、数量、单价、金额、税率、税额），计算各列 X 范围；项目名称列对左侧溢出词、规格列对右侧溢出词有扩展规则（`_match_words_in_column`）。
 
-1. **PDF 格式要求**:
-- 仅处理第一页
-- 需要包含可提取的文本（非纯图片）
-- 建议使用标准格式的电子发票
+==== 阶段 2：逐行提取（`_extract_item_from_row`）
 
-2. **发票格式要求**:
-- 需要包含标准的表头关键词
-- 项目名称需要符合 `*项目名称*费用名称` 模式
-- 日期格式需要是 `YYYY年MM月DD日`
+* 按列匹配器填充 `LineItem` 各字段
+* `_find_item_name()` 提取项目名称（列匹配 + `*类别*` 识别）
+* 无项目名称时：若有数量/单价/金额 **或仅有规格**（规格折行），仍保留该行
 
-3. **文件系统**:
-- 文件移动支持跨文件系统（使用 `shutil.move`）
+==== 阶段 3：跨行合并（`merge_split_line_items` → `_merge_continuation_lines`）
 
-## 错误处理
+按优先级扫描后续行：
 
-- 解析失败的发票会记录错误日志，但不会中断整个流程
-- 文件移动失败会跳过该文件，继续处理下一张
-- Excel 写入失败会记录错误并退出
+[source]
+----
+1. 新 *类别* 首行 → 停止
+2. 有金额行 → 补全当前商品 / 或停止
+3. 项目名称续行 → 合并（叠印与非叠印策略不同）
+4. 规格型号折行 → 拼接 spec
+5. 单字段行 → 合并后继续
+6. 通用折行 / 互补字段 → 兜底
+----
 
-## 参考
+*叠印*与*非叠印*在 `_parent_allows_name_continuation()` 上策略不同：
 
-本项目参考了 Go 版本的发票解析系统，使用 Python 和 pdfplumber 重新实现。
-python -m nuitka --standalone --onefile --mingw64 --noinclude-unittest-mode=nofollow --noinclude-pytest-mode=nofollow --lto=yes --jobs=4 --windows-uac-admin --onefile-tempdir-spec="{CACHE_DIR}/todd_dev_studio/invoice" --windows-icon-from-ico=invoice_logo.ico --company-name="Todd Dev Studio" --product-name="InvoiceParser" --file-version=1.0.0.0 --product-version=1.0.0.0 --file-description="用于处理发票数据的自动化工具" --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." --output-filename=invoice .\src\invoice\main.py
+* *叠印*：仅括号未闭合时允许名称续行；需 Y 坐标匹配 + `suffix_completes_parent_name()` 语义校验
+* *非叠印*：`*类别*` 首行后允许多行规格/描述折行（如得力胶带、绿林工具类发票）
+
+== 发票模版说明
+
+当前代码主要适配 **模版 1**（标准增值税电子普通/专用发票），详见 link:invoice_template1.md[invoice_template1.md]。
+
+**模版 2**（税务机关代开）布局差异较大，见 link:invoice_template2.md[invoice_template2.md]，尚未完整实现。
+
+=== 模版 1 关键约定
+
+* 项目名称：`*税收分类简称*商品名`（如 `*文具*得力…`、`*热力*供暖费`）
+* 表头至少匹配 4 个列关键词
+* 日期：`YYYY年MM月DD日`
+* 明细常出现 *名称/规格/数值分多行*，依赖跨行合并
+
+== 已知复杂场景与处理方式
+
+本节将迭代中暴露的问题**对应到具体代码**，说明改哪里容易连带出错、改后必须回归什么。与下文「历史问题与修 A 坏 B 教训」互补：本节偏**改代码前的检查清单**。
+
+=== 场景总览
+
+[cols="1,2,1,2"]
+|===
+| 场景 | 典型样本 | 期望 | 改动时必须同步回归
+
+| 同页叠印（A/B 两套版式）
+| `4-78#invoice2611700000010928567420260429083910.pdf`
+| 32 条明细
+| 烟草叠印 + 富卓多页 + 厚双面胶
+
+| 单页多页模版（页码递增）
+| `富卓128.45元发票.pdf`
+| 10 条明细
+| 富卓多页 + 烟草叠印
+
+| 项目名称多行（非叠印）
+| `厚双面胶34.2.pdf`
+| 2 条，名称含 18mm/24mm 片段
+| 厚双面胶 + 烟草叠印
+
+| 规格型号折行
+| `25.11.2_26-1504_供暖2023.2.pdf`
+| 1 条，spec=`25/11/15-26/3/15`
+| 供暖 + 厚双面胶
+
+| 同行多商品（叠印混排）
+| 烟草 Y=165 `中南海`+`金桥`
+| 拆成 2 条、不串列
+| 烟草叠印
+
+| 括号折行 suffix（叠印）
+| 烟草 `中南海(软`+`精品)`、`77`+`7）`
+| 名称闭合正确
+| 烟草叠印 + 厚双面胶
+
+| 规格/尺寸中含 `*`
+| 厚双面胶 `18mm*5y*2.5mm`
+| 不误当 `*类别*`
+| 厚双面胶 + 供暖
+|===
+
+以下按**处理链路**展开：分区 → 提取 → 合并 → 正则。
+
+=== 1. 同页叠印（A/B 两套版式）
+
+==== 现象
+
+* PDF 内同一页画了两次版式（负 Y 一套 + 正 Y 一套）；复制粘贴只见一份，pdfplumber 读出两套 Y。
+* 表头/开票日期/global 边界颠倒 → 表头进 `header_words`、明细解析 0 条。
+* B 套噪声进表格：购销方残片（`信`/税号）、开票日期碎片、重复表头 Y=150、同一商品画两遍（38 条应为 32）。
+
+==== 关键代码（勿混用多页模版逻辑）
+
+[cols="2,3"]
+|===
+| 位置 | 职责与注意点
+
+| `invoice_partition.py` → `partition_invoice_by_lines()`
+| 在 `group_words_by_y` 之后调用 `apply_layout_preprocessing()`；有 `layout` 时分区边界用 `layout.header_last_y` / `layout.table_first_y`，**禁止**仍用全页最上表头 + 最下开票日期的极值
+
+| `invoice_layout.py` → `compute_layout_bounds()` / `apply_layout_preprocessing()`
+| 检测叠印、选主层表头 Y、删重复表头行；改打分/阈值会影响所有叠印票
+
+| `invoice_layout.py` → `find_primary_header_row_y()`
+| 明细解析表头**必须**与主层一致；勿改回「取第一个表头行」
+
+| `invoice_layout.py` → `should_skip_table_row()` / `filter_row_noise_words()`
+| 跳过 B 套噪声行、按列 X 剔词；放宽可能放进购销方，收紧可能删掉 spec 折行
+
+| `invoice_layout.py` → `split_merged_detail_row()`
+| 一行多个 `*类别*` 时按商品拆分；勿与「多行续行合并」混淆
+
+| `invoice_layout.py` → `OverlayItemDedupTracker`
+| 叠印下按 `(项目名, 金额)` 去重，保留 Y 更小的一条；**仅 `layout.has_overlay=True` 时启用**
+
+| `invoice_service.py` → `_extract_items_from_table_row()`
+| 统一入口：skip → filter → split → extract → dedup；新增提取分支应挂在这里
+|===
+
+==== 修改禁忌
+
+* 不要用「表头 Y 间距 > 200」单独判定多页模版（见场景 2）。
+* 不要在非叠印票上启用叠印去重或 orphan Y 严格匹配。
+* 改 `should_skip_table_row` 时确认：orphan 续行（`is_orphan_suffix_only_row`）**不能**被误 skip。
+
+=== 2. 单页多页模版 vs 叠印副层
+
+==== 现象
+
+* 物理一页内顺序出现「第1页内容 + 第2页内容」→ 应保留两段明细（富卓 10 条）。
+* 两表头附近都是「第2页」、内容重复 → 仍是叠印副层，应去重（烟草 32 非 38）。
+
+==== 关键代码
+
+[cols="2,3"]
+|===
+| 位置 | 职责与注意点
+
+| `invoice_layout.py` → `_is_sequential_multi_page_template()`
+| 两表头附近页码**递增**（第1页→第2页）→ 多页模版，`has_overlay=False`，**不去重**
+
+| `invoice_layout.py` → `_page_numbers_near_header()` / `compute_layout_bounds()`
+| 两表头附近页码**相同** → 仍按叠印处理
+|===
+
+==== 修改禁忌
+
+* 禁止：见「两个表头 + 第2页标记」就设 `has_overlay=False`。
+* 改 `_is_sequential_multi_page_template` 或 `estimate_overlay_y_offset` 的 `max_gap` 时，**必须**同时跑烟草（32）和富卓（10）。
+
+=== 3. 项目名称多行（非叠印）
+
+==== 现象
+
+* 首行 `*类别*商品名`，次行规格/描述（无金额）；整段应合并为一条商品名。
+* 典型：`厚双面胶` 两行名称 + 规格描述；续行 `18mm*5y*2.5mm加厚` 曾被当噪声丢弃。
+
+==== 关键代码
+
+[cols="2,3"]
+|===
+| 位置 | 职责与注意点
+
+| `invoice_service.py` → `_parent_allows_name_continuation()`
+| **非叠印**：`*类别*` 首行后允许多行描述；**叠印**：仅括号未闭合时允许。改叠印分支时勿收紧非叠印分支
+
+| `invoice_service.py` → `_is_plausible_name_continuation_text()` / `_is_item_name_continuation_line()`
+| 判定续行是否可合并；依赖 `has_project_name_at_start()`，**禁止**用无锚点 `PROJECT_NAME_REGEX.search()`
+
+| `invoice_service.py` → `_merge_continuation_lines()` 步骤 3～5
+| 名称续行 → 规格续行 → 单字段行；调整顺序或 break 条件易漏合并
+
+| `invoice_service.py` → `_find_item_name()`
+| 有 `*类别*` 单词 shortcut 时，若列匹配文本更长，**必须**优先列匹配（否则丢同行 `泡沫双面胶强力`）
+
+| `invoice_layout.py` → `extract_orphan_prefix_from_row()` / `strip_orphan_prefix_from_name()`
+| 剥前缀时只用 `has_project_name_at_start()`；勿把 `18mm*5y*` 当中新商品起点
+
+| `invoice_service.py` → `_should_discard_unmerged_item()`
+| 未合并续行当噪声丢弃；放宽/收紧都会影响 orphan 行是否进最终结果
+|===
+
+==== 修改禁忌
+
+* 禁止：为叠印收紧 `_is_plausible_name_continuation_text` 而不区分 `layout.has_overlay`。
+* 禁止：在 `_find_item_name` 恢复「单个 `*类别*` 词直接 return」且不比较列宽文本。
+
+=== 4. 规格型号折行
+
+==== 现象
+
+* 规格跨两行：上行 `25/11/15-26/3/`，下行仅 `15`；合并后 `25/11/15-26/3/15`。
+* 失败时 Y=174 行**无 X 坐标 DEBUG**（在 `_extract_item_from_row` 提前 return，日志在后面）。
+
+==== 关键代码
+
+[cols="2,3"]
+|===
+| 位置 | 职责与注意点
+
+| `invoice_service.py` → `_extract_item_from_row()` 约 1022 行
+| 无 `item_name` 时：除数量/单价/金额外，**仅有 `spec` 也必须保留**（`has_spec_only`）
+
+| `invoice_service.py` → `_is_spec_continuation_line()` + `_merge_continuation_lines()` 步骤 4
+| 有 spec、无 amount、字段数 ≤2 → 拼接到上一条 `merged_item.spec`
+
+| `invoice_layout.py` → `row_has_item_data_signal()`
+| `data_columns` 须含 `规格型号`，否则仅 spec 行信号弱
+|===
+
+==== 修改禁忌
+
+* 禁止：`_line_item_has_numeric_data()` 为 false 就 return None（须先看 spec）。
+* 禁止：把纯数字短 spec 续行（`15`）当成数量列或噪声 drop。
+
+=== 5. 括号折行 suffix（叠印为主）
+
+==== 现象
+
+* 商品名在括号处断行：`中南海(软` / `精品)`；`长白山（77` / `7）`（勿拼成 `777）`）。
+* 误接：已闭合的 `泰山（望岳）` 不应接 `钗烤烟)`。
+
+==== 关键代码
+
+[cols="2,3"]
+|===
+| 位置 | 职责与注意点
+
+| `invoice_layout.py` → `merge_item_name_suffix()`
+| 折行重复字符去重（`77`+`7）`）
+
+| `invoice_layout.py` → `suffix_completes_parent_name()`
+| suffix 是否属于 parent；改 foreign marker 须用烟草全量回归
+
+| `invoice_layout.py` → `pick_orphan_suffix_for_parent()` / `split_orphan_suffix_fragments()`
+| 混排一行多 suffix 时选取匹配段
+
+| `invoice_service.py` → `_merge_orphan_suffix_to_item()`
+| 短 suffix 合并入口
+
+| `invoice_layout.py` → `orphan_suffix_owned_by_parent_y()`
+| 叠印下 suffix 须 Y 对齐主行
+|===
+
+==== 修改禁忌
+
+* 禁止：为防误接而全局禁止「含 `)` 的续行」——非叠印 `*类别*` 后续行也可能含括号片段。
+* 改 `is_orphan_suffix_fragment_text` 长度上限时，注意长规格描述行（>15 字）走整行合并而非 orphan。
+
+=== 6. 规格/尺寸字符串中含 `*`（全局规则）
+
+==== 现象
+
+* `18mm*5y*2.5mm加厚` 中 `*5y*2.5mm` 曾被 `PROJECT_NAME_REGEX` 误识别为 `*类别*商品*`。
+
+==== 唯一正确识别方式
+
+[cols="2,3"]
+|===
+| 位置 | 规则
+
+| `regex_utils.py` → `has_project_name_at_start()`
+| `*类别*` 须在文本**开头**，且 `类别` 段须含**中文**（如 `*文具*`，非 `*5y*`）
+|===
+
+==== 必须使用 `has_project_name_at_start` 的位置（勿改回 `PROJECT_NAME_REGEX.search`）
+
+* `_is_plausible_name_continuation_text()`、`_is_item_name_first_line()`
+* `_find_item_name()` 的 name_hits 筛选
+* `extract_orphan_prefix_from_row()`、`strip_orphan_prefix_from_name()`
+* `is_orphan_suffix_only_row()`、`extract_orphan_suffix_text()`、`is_orphan_suffix_fragment_text()` 中的「是否为新商品首行」判断
+
+==== 修改禁忌
+
+* `PROJECT_NAME_REGEX` 仍可用于「行内是否出现商品名模式」的**粗筛**，但**不能**用于「这段文本是不是新商品首行 / 能不能当续行」。
+
+=== 7. 同行多商品 + 购销方词污染（叠印）
+
+==== 现象
+
+* 一行两个 `*烟草制品*…` + 两套金额 → 列字段串在一起。
+* 购销方 `名称：`、税号标签与 `*利群*` 同一行。
+
+==== 关键代码
+
+[cols="2,3"]
+|===
+| 位置 | 职责与注意点
+
+| `invoice_layout.py` → `split_merged_detail_row()` + `_extract_item_from_row(..., column_value_index=)`
+| 按商品索引取同列第 N 个值
+
+| `invoice_layout.py` → `is_overlay_contaminated_row()` / `_is_valid_column_word()`
+| 购销方词不进项目名列
+
+| `invoice_service.py` → `_has_concatenated_column_values()`
+| 检测列串多值并丢弃错误解析
+|===
+
+=== 8. 改代码前的最小检查项
+
+改以下任一文件时，先对照上表找到对应场景，再跑下文「修改代码时的回归清单」：
+
+* `regex_utils.py` — 场景 6（`*` 误匹配）
+* `invoice_layout.py` — 场景 1、2、5、7（叠印/噪声/suffix）
+* `invoice_service.py` — 场景 3、4、合并循环（`_merge_continuation_lines`）
+
+**三类 orphan 行不可互相误杀：**
+
+[source]
+----
+仅 item_name（名称折行）  → 合并步骤 3/5
+仅 spec（规格折行）        → 提取须保留 + 合并步骤 4
+仅有 amount/qty/price      → 合并步骤 2
+----
+
+若分区 DEBUG 有某 Y 行、明细 DEBUG 无该行 X 坐标 → 查 `_extract_item_from_row` early return，而非先查 merge。
+
+
+== 修改代码时的回归清单
+
+**每次改动 `invoice_layout.py`、`invoice_service.py`、`regex_utils.py` 中与明细/合并/叠印相关的逻辑，必须跑以下样本：**
+
+[source,bash]
+----
+PYTHONPATH=src:src/invoice python3 -c "
+from invoice.invoice_service import extract_invoice_by_table_and_text
+cases = [
+    ('厚双面胶', '…/厚双面胶34.2.pdf', 2),
+    ('烟草叠印', '…/4-78#invoice2611700000010928567420260429083910.pdf', 32),
+    ('富卓多页', '…/富卓128.45元发票.pdf', 10),
+    ('供暖规格折行', '…/25.11.2_26-1504_供暖2023.2.pdf', 1),
+]
+for name, path, n in cases:
+    inv = extract_invoice_by_table_and_text(path)
+    assert len(inv.items) == n, (name, len(inv.items))
+print('OK')
+"
+----
+
+供暖发票额外断言：`inv.items[0].spec == '25/11/15-26/3/15'`
+
+厚双面胶额外断言：两条明细的项目名称均含 `18mm` / `24mm` 规格片段。
+
+== 历史问题与「修 A 坏 B」教训
+
+以下按**时间线**归纳典型事故；各场景对应的函数与修改禁忌见上文「已知复杂场景与处理方式」。
+
+=== 1. 叠印修复 → 普通发票项目名称续行丢失
+
+* *现象*：`厚双面胶34.2.pdf` 第二行 `胶 18mm*5y*2.5mm加厚…` 被丢弃，只保留首行 `*文具*得力…`
+* *根因*：
+** `PROJECT_NAME_REGEX`（`\*[^*]+\*[^*]+`）在 `18mm*5y*2.5mm` 中误匹配 `*5y*2.5mm加厚`，续行判定失败
+** `_find_item_name()` 的「单词内仅一个 *类别*」快捷路径只返回第一个词，丢失同行的 `泡沫双面胶强力`
+** `strip_orphan_prefix_from_name()` 同样误把 `18mm` 前的 `胶` 剥掉
+* *修复*：引入 `has_project_name_at_start()`（要求 `*类别*` 在文本开头且类别含中文）；列匹配优先于单词 shortcut
+* *教训*：**叠印 orphan 逻辑的收紧，不能复用到非叠印的多行规格合并**；凡用 `PROJECT_NAME_REGEX.search()` 必须考虑规格字符串中的 `*`
+
+=== 2. 叠印 vs 多页模版混淆 → 明细重复
+
+* *现象*：烟草发票第 2 页表头被当成叠印副层未去重，6 个商品各出现 2 次（38 条应为 32 条）
+* *根因*：两个表头 Y 间距大且有「第2页」，误判为多页模版而 `has_overlay=False`
+* *修复*：`_is_sequential_multi_page_template()` — 两表头附近页码**相同**仍按叠印；页码**递增**才是多页模版
+* *教训*：不能仅用表头间距判断；必须看**分页标记是否顺序递增**
+
+=== 3. 叠印 suffix 过严 → 合法续行被拒或错误拼接
+
+* *现象*：`77` + `7）` 拼成 `777）`；`mg)` 被拆；`泰山（望岳）` 误接 `钗烤烟)`
+* *根因*：foreign marker、orphan 长度限制、字符类正则过窄
+* *修复*：`merge_item_name_suffix()` 处理折行重复字符；放宽 `suffix_completes_parent_name()`；foreign marker 仅在全角括号内已有完整中文名时拒绝
+* *教训*：叠印续行是**语义 + 几何**双重约束，改动任一条件都要用烟草 PDF 全量回归
+
+=== 4. 供暖发票规格续行 `15` 无日志、未合并
+
+* *现象*：规格应为 `25/11/15-26/3/15`，实际 `25/11/15-26/3/`；Y=174 行 `15` 无 X 坐标 DEBUG 输出
+* *根因*：`_extract_item_from_row()` 在「无项目名称且无数量/单价/金额」时提前 `return None`，**仅有 spec 的折行被丢弃**（日志在 return 之后）
+* *修复*：无项目名称时，若已有规格字段也保留该行；`row_has_item_data_signal()` 纳入规格列
+* *教训*：明细行不一定带金额；**规格折行、名称折行、数值行**是三种独立入口，early return 条件要三者兼顾
+
+=== 5. 通用原则（后续开发必守）
+
+. **叠印逻辑与非叠印逻辑分支保持独立**（`_parent_allows_name_continuation`、`layout.has_overlay`）
+. **`*类别*` 识别只用 `has_project_name_at_start()`**，禁止对整段文本无锚点 `search(PROJECT_NAME_REGEX)`
+. **改合并优先级或 early return 前**，确认是否影响「仅 spec / 仅 name / 仅 amount」三类 orphan 行
+. **新增正则或过滤条件**，先用含 `*`、含 `/`、含括号、含纯数字的边界样本验证
+. **DEBUG 日志在 discard 之前**：若某行分区日志里完全消失，先查 `_extract_item_from_row` 与 `should_skip_table_row` 的 early return
+
+== 核心 API 与数据模型
+
+=== LineItem 字段
+
+`item_name`, `spec`, `unit`, `quantity`, `price`, `amount`, `tax_rate`, `tax_amount`, `source_y`
+
+`source_y` 为 PDF 行 Y 坐标，跨行合并与叠印 orphan 匹配依赖此字段。
+
+=== 主要入口
+
+* `extract_invoice_by_table_and_text(pdf_path) -> Invoice` — 单张发票完整解析
+* `parse_line_items_from_words_raw(...)` — 单页原始明细（不合并）
+* `merge_split_line_items(...)` — 跨行合并
+
+== 输出
+
+=== Excel
+
+路径：`{base_path}/invoice.xlsx`（追加模式）
+
+列：发票号码、开票日期、购买方、项目名称、规格、单位、数量、单价、金额、税率、税额、发票文件名、录入时间、购买方税号、发票类型
+
+=== 文件归档
+
+解析成功后移动到 `{base_path}/YYYY/MM/`（以开票日期为准）。
+
+== 限制与假设
+
+* 支持多页发票；基本信息取自第一页，明细合并所有页
+* PDF 须含可提取文本（非纯扫描图）
+* 代开发票（模版 2）仅部分字段可解析
+* 列坐标完全依赖表头 X 位置；表头严重错位或缺列时可能失败
+
+== 参考
+
+本项目参考 Go 版本发票解析系统，使用 Python + pdfplumber 重新实现。
+
+== Nuitka 打包（Windows）
+
+在项目根目录执行：
+
+[source,bash]
+----
+.\build.bat
+----
+
+或手动（等价）：
+
+[source,bash]
+----
+python -m nuitka --standalone --onefile --mingw64 ^
+  --noinclude-unittest-mode=nofollow --noinclude-pytest-mode=nofollow ^
+  --lto=yes --jobs=4 --windows-uac-admin ^
+  --onefile-tempdir-spec="{CACHE_DIR}/todd_dev_studio/invoice" ^
+  --windows-icon-from-ico=logo.ico ^
+  --company-name="Todd Dev Studio" --product-name="InvoiceParser" ^
+  --file-version=1.0.0.0 --product-version=1.0.0.0 ^
+  --file-description="用于处理发票数据的自动化工具" ^
+  --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." ^
+  --output-filename=invoice src\invoice\main.py
+----

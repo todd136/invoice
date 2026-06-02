@@ -37,6 +37,8 @@ def main():
 
     # 或者使用硬编码路径
     # base_path = '/Volumes/share/temp/receipt'
+    # 解析成功后是否按开票日期归档 PDF（YYYY/MM/）
+    move_file_after_parse = True
 
     # 设置日志系统
     # 全局日志级别：INFO
@@ -51,7 +53,7 @@ def main():
 
     # 创建发票处理器并执行批量处理
     processor = InvoiceProcessor(base_path)
-    processor.process_batch()
+    processor.process_batch(move_file_after_parse=move_file_after_parse)
 
     logging.info('发票解析完成，即将退出...')
 

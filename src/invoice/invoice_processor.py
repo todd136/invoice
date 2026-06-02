@@ -30,10 +30,13 @@ class InvoiceProcessor:
         """
         self.base_path = base_path
     
-    def process_batch(self) -> List[Invoice]:
+    def process_batch(self, move_file_after_parse: bool = False) -> List[Invoice]:
         """
         批量处理发票：扫描、解析、移动、导出
-        
+
+        Args:
+            move_file_after_parse: 解析成功后是否将 PDF 移动到日期目录（默认 False）
+
         Returns:
             成功解析的发票列表
         """
@@ -54,7 +57,9 @@ class InvoiceProcessor:
         # 2. 循环处理每张发票
         invoice_list = []
         for invoice_file in invoice_file_list:
-            invoice = self.process_single(invoice_file, True, invoice_list)
+            invoice = self.process_single(
+                invoice_file, move_file_after_parse, invoice_list,
+            )
             if invoice:
                 invoice_list.append(invoice)
         

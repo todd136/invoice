@@ -10,6 +10,12 @@ import invoice_const
 
 from .text_utils import clean_garbled_chars, reconstruct_text_from_words
 from .regex_utils import DATE_REGEX_LOOSE
+from .invoice_layout import (
+    LayoutBounds,
+    apply_layout_preprocessing,
+    compute_layout_bounds,
+    find_header_last_y_before,
+)
 
 # 获取模块级别的日志记录器
 logger = logging.getLogger(__name__)
@@ -493,7 +499,8 @@ def _filter_bottom_lines_legacy(
 def partition_three_regions_from_grouped_data(
     lines_dict: dict,
     header_bottom_y: Optional[float],
-    table_top_y: Optional[float]
+    table_top_y: Optional[float],
+    layout: Optional[LayoutBounds] = None,
 ) -> Tuple[List[dict], List[dict], List[dict]]:
     """
     基于分组数据+水平线，划分3大块（按行分配）
@@ -565,11 +572,36 @@ def partition_three_regions_from_grouped_data(
                         break
     
     # 如果找到日期值行，将发票头边界扩展到包含日期值行
-    if date_value_y is not None and date_value_y > header_last_y:
+    if layout is None and date_value_y is not None and date_value_y > header_last_y:
         header_last_y = date_value_y
         logger.debug(f'扩展发票头边界到包含日期值行: Y={header_last_y:.2f}')
-    
-    logger.debug(f'关键边界行: 发票头最后一行(开票日期)Y={header_last_y}, 表格第一行(项目名称)Y={table_first_y}')
+
+    if layout is None and header_last_y and table_first_y and header_last_y > table_first_y:
+        corrected_last = find_header_last_y_before(lines_dict, table_first_y)
+        if corrected_last is not None and table_first_y > corrected_last:
+            header_last_y = corrected_last
+            logger.warning(
+                '检测到边界颠倒，按表头上方开票日期校正: header_last=%.2f, table_first=%.2f',
+                header_last_y, table_first_y,
+            )
+        else:
+            fallback = compute_layout_bounds(lines_dict)
+            if fallback and fallback.table_first_y > fallback.header_last_y:
+                layout = fallback
+                logger.warning(
+                    '检测到边界颠倒(header_last=%.2f > table_first=%.2f)，回退叠印主层边界',
+                    header_last_y, table_first_y,
+                )
+
+    if layout is not None:
+        header_last_y = layout.header_last_y
+        table_first_y = layout.table_first_y
+        logger.debug(
+            '使用叠印主层边界: 发票头最后一行(开票日期)Y=%.2f, 表格第一行(项目名称)Y=%.2f',
+            header_last_y, table_first_y,
+        )
+    else:
+        logger.debug(f'关键边界行: 发票头最后一行(开票日期)Y={header_last_y}, 表格第一行(项目名称)Y={table_first_y}')
     
     # 按Y坐标排序（从上到下）
     sorted_lines = sorted(lines_dict.items(), key=lambda x: x[0])
@@ -1388,10 +1420,10 @@ def _log_all_lines_info(all_lines: List[dict], page_width: float, table_bottom_b
         table_bottom_boundary: 表格底部边界Y坐标
     """
     logger.debug("\n" + "="*80)
-    logger.debug("线条坐标信息（所有线条）")
-    logger.debug("="*80)
-    logger.debug(f"{'序号':<6} {'类型':<10} {'X0':<10} {'X1':<10} {'Y0':<10} {'Y1':<10} {'宽度':<10} {'高度':<10} {'长度':<10} {'过滤原因':<15}")
-    logger.debug("-" * 120)
+    # logger.debug("线条坐标信息（所有线条）")
+    # logger.debug("="*80)
+    # logger.debug(f"{'序号':<6} {'类型':<10} {'X0':<10} {'X1':<10} {'Y0':<10} {'Y1':<10} {'宽度':<10} {'高度':<10} {'长度':<10} {'过滤原因':<15}")
+    # logger.debug("-" * 120)
 
     for i, line in enumerate(all_lines):
         line_type = "水平" if abs(line['y0'] - line['y1']) < 2.0 else "垂直" if abs(line['x0'] - line['x1']) < 2.0 else "斜线"
@@ -1422,7 +1454,7 @@ def _log_all_lines_info(all_lines: List[dict], page_width: float, table_bottom_b
             if line_length < page_width * 0.3:
                 filter_reason = "太短"
 
-        logger.debug(f"{i+1:<6} {line_type:<10} {x0:<10.2f} {x1:<10.2f} {y0:<10.2f} {y1:<10.2f} {width:<10.2f} {height:<10.2f} {length:<10.2f} {filter_reason:<15}")
+        # logger.debug(f"{i+1:<6} {line_type:<10} {x0:<10.2f} {x1:<10.2f} {y0:<10.2f} {y1:<10.2f} {width:<10.2f} {height:<10.2f} {length:<10.2f} {filter_reason:<15}")
 
     logger.debug("="*80 + "\n")
 
@@ -1467,7 +1499,7 @@ def _log_word_lines_grouping(lines_dict: dict):
     logger.debug(f"总共 {len(sorted_lines)} 行\n")
 
 
-def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], List[dict], List[dict], List[dict]]:
+def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], List[dict], List[dict], List[dict], Optional[LayoutBounds]]:
     """
     通过分割线将发票分为4个区域（重构版本：分层分区逻辑）
     
@@ -1482,7 +1514,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
         words: 提取的单词列表（已过滤印章）
     
     Returns:
-        (header_words, buyer_words, seller_words, table_words)
+        (header_words, buyer_words, seller_words, table_words, layout_bounds)
     """
     # 获取页面尺寸
     page_width = page.width
@@ -1505,7 +1537,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     logger.debug(f'过滤后剩余 {len(lines)} 条相关线条（已排除底部价税合计/备注等行的分割线）')
     
     # 打印过滤后的线条信息
-    _log_filtered_lines(lines)
+    # _log_filtered_lines(lines)
 
     # ========== 新逻辑：分层分区 ==========
     logger.debug("\n" + "="*80)
@@ -1522,6 +1554,9 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     lines_dict = group_words_by_y(words, y_tolerance=3.0)
     _log_word_lines_grouping(lines_dict)
 
+    # 步骤2.1：叠印检测与主层预处理（移除重复表头行，计算主层边界）
+    lines_dict, layout = apply_layout_preprocessing(lines_dict)
+
     # 步骤3：从分组数据中删除底部内容（价税合计、备注等）
     filtered_lines_dict = filter_bottom_lines_from_grouped_data(
         lines_dict, table_bottom_y, table_bottom_line_y
@@ -1530,7 +1565,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
     
     # 步骤4：基于分组数据+水平线，划分3大块（按行分配）
     header_words, buyer_seller_words, table_words = partition_three_regions_from_grouped_data(
-        filtered_lines_dict, header_bottom_y, table_top_y
+        filtered_lines_dict, header_bottom_y, table_top_y, layout=layout
     )
     
     # 步骤4：在购销方大块内拆分购买方和销售方
@@ -1543,7 +1578,7 @@ def partition_invoice_by_lines(page, words: List[dict]) -> Tuple[List[dict], Lis
                  f'销售方={len(seller_words)}个单词, '
                  f'表格={len(table_words)}个单词')
     
-    return header_words, buyer_words, seller_words, table_words
+    return header_words, buyer_words, seller_words, table_words, layout
 
 
 def print_partition_content(

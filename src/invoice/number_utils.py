@@ -2,7 +2,7 @@
 数字处理工具
 """
 import re
-from typing import Optional
+from typing import List, Optional, Tuple
 
 
 def is_tax_id(s: str) -> bool:
@@ -75,5 +75,111 @@ def extract_number(s: str) -> Optional[str]:
     if match:
         return match.group()
     return None
+
+
+def split_quantity_prefix_from_price(
+    price: str,
+    amount: str = '',
+    *,
+    amount_tolerance: float = 0.02,
+) -> Tuple[str, str]:
+    """
+    数量与单价被 PDF 提取拼成同一字符串时拆开。
+
+    例如 ``1202.6194690265487`` 在数量为空、金额为 ``202.62`` 时
+    拆为数量 ``1`` 与单价 ``202.6194690265487``。
+    """
+    compact = (price or '').replace(' ', '')
+    if not compact or '.' not in compact:
+        return '', price
+
+    amount_f: Optional[float] = None
+    if amount and amount.strip():
+        try:
+            amount_f = float(amount.replace(' ', ''))
+        except ValueError:
+            pass
+
+    for qty_len in range(1, min(4, len(compact))):
+        qty_part = compact[:qty_len]
+        if not qty_part.isdigit():
+            continue
+        rest = compact[qty_len:]
+        if not re.match(r'\d+\.\d+', rest):
+            continue
+        try:
+            q = float(qty_part)
+            p = float(rest)
+        except ValueError:
+            continue
+        if q <= 0 or q > 9999:
+            continue
+        if amount_f is not None and amount_f > 0:
+            rel_err = abs(q * p - amount_f) / amount_f
+            if rel_err <= amount_tolerance:
+                return qty_part, rest
+
+    return '', price
+
+
+def amount_matches_qty_price(
+    quantity: str,
+    price: str,
+    amount: str,
+    *,
+    tolerance: float = 0.02,
+) -> bool:
+    """数量×单价是否与金额一致（允许相对误差）。"""
+    try:
+        q = float((quantity or '1').replace(' ', ''))
+        p = float((price or '').replace(' ', ''))
+        a = float((amount or '').replace(' ', ''))
+    except ValueError:
+        return False
+    if a <= 0:
+        return False
+    return abs(q * p - a) / a <= tolerance
+
+
+def pick_price_matching_amount(
+    candidates: List[str],
+    quantity: str,
+    amount: str,
+    *,
+    tolerance: float = 0.02,
+) -> str:
+    """叠印混排行同列多个单价候选时，选取与金额最吻合的一项。"""
+    if not candidates:
+        return ''
+    if not amount or not amount.strip():
+        return candidates[0]
+
+    try:
+        q = float((quantity or '1').replace(' ', ''))
+        amt = float(amount.replace(' ', ''))
+    except ValueError:
+        return candidates[0]
+
+    if amt <= 0:
+        return candidates[0]
+
+    best = ''
+    best_err = float('inf')
+    for candidate in candidates:
+        compact = candidate.replace(' ', '')
+        if not compact or '%' in compact:
+            continue
+        try:
+            p = float(compact)
+        except ValueError:
+            continue
+        err = abs(q * p - amt) / amt
+        if err < best_err:
+            best_err = err
+            best = candidate
+
+    if best and best_err <= tolerance:
+        return best
+    return candidates[0]
 
 
