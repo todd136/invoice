@@ -360,6 +360,61 @@ def extract_date_from_words(header_words: List[dict]) -> str:
     return ''
 
 
+_BUYER_NAME_STOP_KEYWORDS = (
+    '统一社会信用代码', '纳税人识别号', '销售方', '购买方', '买方', '卖方', '信息',
+    '名称：', '名称:',
+)
+
+# 「公司」之后若仅为这些组织后缀，视为名称一部分（如 …有限责任公司工会）
+_BUYER_NAME_SUFFIX_AFTER_COMPANY = frozenset({
+    '工会', '分公司', '支公司', '营业部', '经营部', '服务部', '办事处', '代表处',
+})
+
+
+def _strip_buyer_name_at_stop_keywords(name: str) -> str:
+    """截断到噪声关键词之前"""
+    buyer = name.strip()
+    for kw in _BUYER_NAME_STOP_KEYWORDS:
+        if kw in buyer:
+            idx = buyer.index(kw)
+            if idx > 0:
+                return buyer[:idx].strip()
+    return buyer
+
+
+def _trim_buyer_name_at_company_boundary(name: str) -> str:
+    """
+    仅在「公司」后接销售方/第二段名称等噪声时截到「公司」；
+    保留 …有限责任公司工会 等合法后缀。
+    """
+    if '公司' not in name:
+        return name
+    idx = name.rindex('公司')
+    tail = name[idx + 2:].strip()
+    if not tail:
+        return name
+    if tail in _BUYER_NAME_SUFFIX_AFTER_COMPANY:
+        return name
+    if re.match(r'^[\u4e00-\u9fa5]{2,8}$', tail) and not any(
+        kw in tail for kw in ('销售', '购买', '名称', '公司')
+    ):
+        return name
+    noise_in_tail = any(kw in tail for kw in (
+        '名称', '统一社会', '纳税人', '销售', '购买', '买方', '卖方', '公司',
+    ))
+    if noise_in_tail:
+        return name[:idx + 2].strip()
+    return name
+
+
+def _finalize_extracted_buyer_name(name: str) -> str:
+    """购买方名称提取后的统一清洗"""
+    buyer = normalize_text_whitespace(name.strip())
+    buyer = _strip_buyer_name_at_stop_keywords(buyer)
+    buyer = _trim_buyer_name_at_company_boundary(buyer)
+    return buyer
+
+
 def extract_buyer_name_from_words(buyer_words: List[dict]) -> str:
     """从购买方区域提取购买方名称"""
     if not buyer_words:
@@ -376,39 +431,16 @@ def extract_buyer_name_from_words(buyer_words: List[dict]) -> str:
     name_pattern = re.compile(r'名称[：:]\s*((?:(?!统一社会信用代码|纳税人识别号).)+?)(?=\s*(?:统一社会信用代码|纳税人识别号)|$)', re.DOTALL)
     match = name_pattern.search(buyer_text)
     if match:
-        buyer = match.group(1).strip()
-        # 清理可能包含的换行符，但保留空格（公司名称中可能有空格）
-        buyer = normalize_text_whitespace(buyer)
-        # 如果提取的内容包含关键词，截取到关键词之前（双重保险）
-        stop_keywords = ['统一社会信用代码', '纳税人识别号', '销售方', '购买方', '买方', '卖方', '信息']
-        for kw in stop_keywords:
-            if kw in buyer:
-                idx = buyer.index(kw)
-                if idx > 0:
-                    buyer = buyer[:idx].strip()
-                    break
-        stop_keywords = '公司'
-        if stop_keywords in buyer:
-            idx = buyer.rindex(stop_keywords)
-            if idx > 0:
-                buyer = buyer[:idx+2].strip()
-        # 排除税号（如果提取的内容是纯税号，则跳过）
+        buyer = _finalize_extracted_buyer_name(match.group(1))
         if buyer and not is_tax_id(buyer) and not re.match(r'^\d{12,}$', buyer):
             return buyer
 
     # 策略2：匹配公司名称模式
     match = COMPANY_NAME_REGEX.search(buyer_text)
     if match:
-        buyer = match.group(1)
-        # 如果匹配到的内容包含关键词，截取到关键词之前
-        stop_keywords = ['统一社会信用代码', '纳税人识别号', '销售方', '购买方']
-        for kw in stop_keywords:
-            if kw in buyer:
-                idx = buyer.index(kw)
-                if idx > 0:
-                    buyer = buyer[:idx].strip()
-                    break
-        return buyer
+        buyer = _finalize_extracted_buyer_name(match.group(1))
+        if buyer:
+            return buyer
 
     # 策略3：匹配房间号
     match = ROOM_NUMBER_REGEX.search(buyer_text)
