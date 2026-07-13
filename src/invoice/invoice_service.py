@@ -407,11 +407,31 @@ def _trim_buyer_name_at_company_boundary(name: str) -> str:
     return name
 
 
+def _strip_buyer_seller_fragments_from_name(name: str) -> str:
+    """去掉 PDF 折行产生的购销方标签碎片（如「买」「方」「信」「息」）"""
+    buyer = normalize_text_whitespace(name).strip()
+    parts = buyer.split()
+    while parts and is_buyer_seller_fragment_text(parts[-1]):
+        parts.pop()
+    while parts and is_buyer_seller_fragment_text(parts[0]):
+        parts.pop(0)
+    buyer = ' '.join(parts)
+    # PDF 折行有时把「方」紧贴在公司名后：…有限公司方
+    while len(buyer) > 1:
+        tail = buyer[-1]
+        if tail in '购销买卖方信息' and is_buyer_seller_fragment_text(tail):
+            buyer = buyer[:-1].rstrip()
+        else:
+            break
+    return buyer
+
+
 def _finalize_extracted_buyer_name(name: str) -> str:
     """购买方名称提取后的统一清洗"""
     buyer = normalize_text_whitespace(name.strip())
     buyer = _strip_buyer_name_at_stop_keywords(buyer)
     buyer = _trim_buyer_name_at_company_boundary(buyer)
+    buyer = _strip_buyer_seller_fragments_from_name(buyer)
     return buyer
 
 
