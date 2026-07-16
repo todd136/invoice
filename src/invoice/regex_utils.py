@@ -43,7 +43,14 @@ TAX_ID_GLOBAL_REGEX = re.compile(r'[A-Za-z0-9]{15,20}')
 LONG_NUMBER_REGEX = re.compile(r'\d{12,20}')
 ROOM_NUMBER_REGEX = re.compile(r'\b\d+-\d+(?:-\d+)?\b')
 ROOM_ALPHA_REGEX = re.compile(r'\b[A-Za-z]?\d{3,6}\b')
-COMPANY_NAME_REGEX = re.compile(r'([\u4e00-\u9fa5]+(?:（[^）]+）)?[\u4e00-\u9fa5]*(?:公司|企业|有限|股份|集团|个体工商户))')
+# 可选组织后缀（…有限责任公司工会 / …公司分公司）
+_COMPANY_ORG_SUFFIX = r'(?:工会|分公司|支公司|营业部|经营部|服务部|办事处|代表处)?'
+COMPANY_NAME_REGEX = re.compile(
+    r'([\u4e00-\u9fa5]+(?:（[^）]+）)?[\u4e00-\u9fa5]*'
+    r'(?:公司|企业|有限|股份|集团|个体工商户)'
+    + _COMPANY_ORG_SUFFIX
+    + r')'
+)
 
 
 def normalize_alpha_num(s: str) -> str:

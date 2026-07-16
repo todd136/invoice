@@ -385,26 +385,39 @@ def _strip_buyer_name_at_stop_keywords(name: str) -> str:
 def _trim_buyer_name_at_company_boundary(name: str) -> str:
     """
     仅在「公司」后接销售方/第二段名称等噪声时截到「公司」；
-    保留 …有限责任公司工会 等合法后缀。
+    保留 …有限责任公司工会 等合法后缀；后缀后再跟折行噪声时只保留后缀。
     """
     if '公司' not in name:
         return name
-    idx = name.rindex('公司')
-    tail = name[idx + 2:].strip()
-    if not tail:
+
+    start = 0
+    while True:
+        idx = name.find('公司', start)
+        if idx < 0:
+            return name
+        # 跳过「分公司/支公司」内部的「公司」，优先用更早的公司名结尾
+        if idx >= 1 and name[idx - 1] in '分支' and '公司' in name[:idx]:
+            start = idx + 2
+            continue
+
+        head = name[:idx + 2]
+        tail = name[idx + 2:].strip()
+        if not tail:
+            return name
+        # …公司工会买:方信 → 保留「工会」，丢掉折行标签
+        for suffix in sorted(_BUYER_NAME_SUFFIX_AFTER_COMPANY, key=len, reverse=True):
+            if tail == suffix or tail.startswith(suffix):
+                return head + suffix
+        if re.match(r'^[\u4e00-\u9fa5]{2,8}$', tail) and not any(
+            kw in tail for kw in ('销售', '购买', '名称', '公司')
+        ):
+            return name
+        noise_in_tail = any(kw in tail for kw in (
+            '名称', '统一社会', '纳税人', '销售', '购买', '买方', '卖方', '公司',
+        ))
+        if noise_in_tail:
+            return head.strip()
         return name
-    if tail in _BUYER_NAME_SUFFIX_AFTER_COMPANY:
-        return name
-    if re.match(r'^[\u4e00-\u9fa5]{2,8}$', tail) and not any(
-        kw in tail for kw in ('销售', '购买', '名称', '公司')
-    ):
-        return name
-    noise_in_tail = any(kw in tail for kw in (
-        '名称', '统一社会', '纳税人', '销售', '购买', '买方', '卖方', '公司',
-    ))
-    if noise_in_tail:
-        return name[:idx + 2].strip()
-    return name
 
 
 def _strip_buyer_seller_fragments_from_name(name: str) -> str:
@@ -445,10 +458,12 @@ def extract_buyer_name_from_words(buyer_words: List[dict]) -> str:
     # 基本清洗
     buyer_text = clean_garbled_chars(buyer_text)
     
-    # 策略1：从"名称："后面提取，直到遇到"统一社会信用代码"或"纳税人识别号"
-    # 使用正向先行断言，匹配"名称："后面到"统一社会信用代码"/"纳税人识别号"之前的内容
-    # 使用非贪婪匹配，但确保能匹配到完整内容
-    name_pattern = re.compile(r'名称[：:]\s*((?:(?!统一社会信用代码|纳税人识别号).)+?)(?=\s*(?:统一社会信用代码|纳税人识别号)|$)', re.DOTALL)
+    # 策略1：从"名称"/"名 称"后面提取（冒号可能单独成行），直到税号关键词
+    name_pattern = re.compile(
+        r'名\s*称\s*[：:]?\s*((?:(?!统一社会信用代码|纳税人识别号).)+?)'
+        r'(?=\s*(?:统一社会信用代码|纳税人识别号)|$)',
+        re.DOTALL,
+    )
     match = name_pattern.search(buyer_text)
     if match:
         buyer = _finalize_extracted_buyer_name(match.group(1))
