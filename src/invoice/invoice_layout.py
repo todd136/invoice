@@ -10,7 +10,12 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import invoice_const
 
-from .regex_utils import DATE_REGEX_LOOSE, PROJECT_NAME_REGEX, has_project_name_at_start
+from .regex_utils import (
+    DATE_REGEX_LOOSE,
+    PROJECT_NAME_REGEX,
+    has_project_name_at_start,
+    iter_valid_project_name_matches,
+)
 from .text_utils import clean_garbled_chars
 
 logger = logging.getLogger(__name__)
@@ -363,8 +368,8 @@ def count_item_name_starts(line_words: List[dict]) -> int:
 
 
 def count_products_in_row(line_words: List[dict]) -> int:
-    """一行内 *类别*商品名 模式出现次数"""
-    return len(list(PROJECT_NAME_REGEX.finditer(_row_text(line_words))))
+    """一行内 *类别*商品名 模式出现次数（排除规格中的 mm*45米 等误匹配）"""
+    return len(list(iter_valid_project_name_matches(_row_text(line_words))))
 
 
 def is_multi_product_merged_row(line_words: List[dict]) -> bool:
@@ -872,7 +877,7 @@ def estimate_overlay_y_offset(
         amounts = re.findall(r'\d+\.\d{2}', row_text)
         if not amounts:
             continue
-        for m in PROJECT_NAME_REGEX.finditer(row_text.replace(' ', '')):
+        for m in iter_valid_project_name_matches(row_text.replace(' ', '')):
             prefix = m.group(0)[:40]
             key = (_normalize_dedup_name(prefix), amounts[0])
             buckets.setdefault(key, []).append(y)
@@ -945,7 +950,8 @@ def split_merged_detail_row(line_words: List[dict]) -> List[List[dict]]:
 
     sorted_words = sorted(line_words, key=lambda w: w['x0'])
     row_text = _row_text(sorted_words)
-    matches = list(PROJECT_NAME_REGEX.finditer(row_text))
+    # 必须用「类别含中文」过滤，否则 100mm*45米 会与 *文具*… 组成伪第二商品名
+    matches = list(iter_valid_project_name_matches(row_text))
     if len(matches) < 2:
         return [line_words]
 
@@ -1142,11 +1148,12 @@ def extract_row_product_keys(line_words: List[dict]) -> Set[Tuple[str, str]]:
     """从行文本提取 (项目名前缀, 金额) 集合，用于叠印行比对"""
     cleaned = strip_orphan_prefix_words(line_words)
     row_text = _row_text(cleaned).replace(' ', '')
-    if not PROJECT_NAME_REGEX.search(row_text):
+    valid_matches = list(iter_valid_project_name_matches(row_text))
+    if not valid_matches:
         return set()
     amounts = re.findall(r'\d+\.\d{2}', row_text)
     keys: Set[Tuple[str, str]] = set()
-    for i, m in enumerate(PROJECT_NAME_REGEX.finditer(row_text)):
+    for i, m in enumerate(valid_matches):
         name_key = _normalize_dedup_name(m.group(0)[:40])
         match = re.match(r'(\*[^*]+\*[^*]+)', name_key)
         name_key = match.group(1) if match else name_key[:40]

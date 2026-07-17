@@ -14,10 +14,41 @@ DATE_REGEX = re.compile(r'开票日期[：:\s]*(\d{4}年\d{1,2}月\d{1,2}日)')
 DATE_REGEX_LOOSE = re.compile(r'\d{4}\s*年\s*\d{1,2}\s*[月⽉]\s*\d{1,2}\s*[日⽇]')
 
 # 项目名称模式：*项目名称*费用名称
-PROJECT_NAME_REGEX = re.compile(r'\*[^*]+\*[^*]+')
+PROJECT_NAME_REGEX = re.compile(r'\*([^*]+)\*[^*]+')
 
 # 项目名称须出现在文本开头（避免规格如 18mm*5y*2.5mm 误匹配）
 PROJECT_NAME_AT_START_REGEX = re.compile(r'^\*([^*]+)\*[^*]+')
+
+
+def _category_has_chinese(category: str) -> bool:
+    return bool(re.search(r'[\u4e00-\u9fa5]', category or ''))
+
+
+def is_valid_project_name_match(match: re.Match) -> bool:
+    """
+    *类别*商品 是否为真实税收分类编码名。
+    类别须含中文且不以数字开头，排除规格串误匹配：
+    100mm*45米骑行反… / 18mm*5y*2.5mm
+    """
+    category = (match.group(1) or '').strip()
+    if not category or not _category_has_chinese(category):
+        return False
+    # *45米…* / *18mm* 等规格
+    if re.match(r'^[\d.a-zA-Z]', category):
+        return False
+    if re.search(r'\d+\s*(?:mm|cm|ml|m)\b', category, re.I):
+        return False
+    # 税收分类简称通常较短
+    if len(re.sub(r'\s+', '', category)) > 20:
+        return False
+    return True
+
+
+def iter_valid_project_name_matches(text: str):
+    """遍历文本中的有效 *类别*商品 匹配（类别含中文）"""
+    for m in PROJECT_NAME_REGEX.finditer(text or ''):
+        if is_valid_project_name_match(m):
+            yield m
 
 
 def has_project_name_at_start(text: str) -> bool:
@@ -26,7 +57,7 @@ def has_project_name_at_start(text: str) -> bool:
     m = PROJECT_NAME_AT_START_REGEX.match(compact)
     if not m:
         return False
-    return bool(re.search(r'[\u4e00-\u9fa5]', m.group(1)))
+    return _category_has_chinese(m.group(1))
 
 # 税号模式（包含允许空格的版本，便于从原始文本提取）
 TAX_ID_PATTERNS = [
