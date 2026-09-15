@@ -16,10 +16,10 @@ from src.invoice.logger_config import setup_logger
 def get_executable_dir():
     """
     获取可执行文件所在目录
-    
+
     如果使用PyInstaller等工具打包，sys.executable 指向打包后的可执行文件路径
     否则 sys.executable 指向 Python 解释器路径
-    
+
     返回:
         Path: 可执行文件所在目录（打包后）或 Python 解释器所在目录（开发环境）
     """
@@ -38,7 +38,7 @@ def main():
     # 或者使用硬编码路径
     # base_path = '/Volumes/share/temp/receipt'
     # 解析成功后是否按开票日期归档 PDF（YYYY/MM/）
-    move_file_after_parse = True
+    # move_file_after_parse = False
 
     # 设置日志系统
     # 全局日志级别：INFO
