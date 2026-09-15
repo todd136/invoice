@@ -1,73 +1,55 @@
-name: Build Invoice EXE
+name: Build Windows EXE
 
 on:
-  push:
-    tags:
-      - 'v*' # 当你推送到 v1.0 等标签时触发
-  workflow_dispatch: # 允许你手动在 GitHub 页面点击运行
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-    permissions:
-      contents: write  # 必须有这个权限才能创建 Release 和上传附件
 
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
 
-      - name: Install Dependencies
+      - name: Cache Nuitka
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-${{ runner.os }}-py312-${{ hashFiles('requirements.txt', 'build.bat') }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-py312-
+
+      - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install nuitka==2.8.9 zstandard
           pip install -r requirements.txt
+          pip install "nuitka[onefile]"
 
-      - name: Cache Nuitka Downloads
-        uses: actions/cache@v3
-        with:
-          path: ~\AppData\Local\Nuitka\Nuitka\Cache
-          key: ${{ runner.os }}-nuitka-compiler
-
-      - name: Extract Clean Version
-        id: get_version
-        shell: bash
+      - name: Build with Nuitka
+        shell: cmd
         run: |
-          # 将 v1.0.0 转换为 1.0.0.0，去掉 v 并补全位数
-          RAW_VER=${{ github.ref_name }}
-          CLEAN_VER=$(echo ${RAW_VER#v} | sed 's/[^0-9.]//g')
-          # 确保至少有 3 位，Nuitka 喜欢 X.X.X.X 格式
-          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+          call build.bat
 
-      - name: Build EXE with Nuitka
+      - name: Verify artifact
+        shell: pwsh
         run: |
-          python -m nuitka --standalone --onefile --mingw64 `
-          --noinclude-unittest-mode=nofollow `
-          --assume-yes-for-downloads `
-          --lto=yes `
-          --windows-icon-from-ico=invoice_logo.ico `
-          --company-name="Todd Dev Studio" `
-          --product-name="InvoiceParser" `
-          --file-version=${{ steps.get_version.outputs.version }} `
-          --file-description="用于处理发票数据的自动化工具" `
-          --copyright="Copyright © 2025 Todd Dev Studio. All rights reserved." `
-          --output-filename=invoice `
-          .\src\invoice\main.py
+          if (-not (Test-Path ".\invoice.exe")) {
+            Write-Host "invoice.exe not found in repo root."
+            Get-ChildItem -Path . -Recurse -Filter *.exe | Select-Object FullName
+            throw "Build output invoice.exe not found."
+          }
 
-      - name: Upload Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Invoice-Executable
+          name: invoice-windows-exe
           path: invoice.exe
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: invoice.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if-no-files-found: error

@@ -8,6 +8,7 @@ python -m nuitka ^
   --standalone ^
   --onefile ^
   --mingw64 ^
+  --assume-yes-for-downloads ^
   --noinclude-unittest-mode=nofollow ^
   --noinclude-pytest-mode=nofollow ^
   --lto=yes ^
@@ -24,6 +25,10 @@ python -m nuitka ^
   --output-filename=invoice ^
   src\invoice\main.py
 
+if errorlevel 1 exit /b %errorlevel%
+
 echo.
 echo Build finished. Check invoice.exe in current directory.
+if defined GITHUB_ACTIONS exit /b 0
 pause
+exit /b 0
