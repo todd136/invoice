@@ -9,6 +9,36 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+
+def _neutralize_broken_numpy() -> None:
+    """
+    openpyxl 在 import 时若发现 numpy 会访问 numpy.short。
+    Nuitka onefile 常打进残缺 numpy（import 成功但无 short），导致 AttributeError。
+    本项目不依赖 numpy：探测到残缺时清除并阻止再次导入，让 openpyxl 走无 numpy 分支。
+    """
+    try:
+        import numpy as _np  # noqa: WPS433
+    except ImportError:
+        return
+    if hasattr(_np, 'short'):
+        return
+
+    for key in [k for k in sys.modules if k == 'numpy' or k.startswith('numpy.')]:
+        del sys.modules[key]
+
+    class _NumpyImportBlocker:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == 'numpy' or fullname.startswith('numpy.'):
+                raise ModuleNotFoundError(
+                    'incomplete numpy blocked (openpyxl compatibility)'
+                )
+            return None
+
+    sys.meta_path.insert(0, _NumpyImportBlocker())
+
+
+_neutralize_broken_numpy()
+
 from src.invoice.invoice_processor import InvoiceProcessor
 from src.invoice.logger_config import setup_logger
 
@@ -38,7 +68,7 @@ def main():
     # 或者使用硬编码路径
     # base_path = '/Volumes/share/temp/receipt'
     # 解析成功后是否按开票日期归档 PDF（YYYY/MM/）
-    # move_file_after_parse = False
+    move_file_after_parse = True
 
     # 设置日志系统
     # 全局日志级别：INFO

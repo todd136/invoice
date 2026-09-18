@@ -36,6 +36,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install "nuitka[onefile]"
+          # 本项目不需要 numpy；避免残缺 numpy 被打进 exe 后触发 openpyxl 的 numpy.short 错误
+          pip uninstall -y numpy 2>$null
+          python -c "import importlib.util; assert importlib.util.find_spec('numpy') is None, 'numpy still installed'"
 
       - name: Build with Nuitka
         shell: cmd
