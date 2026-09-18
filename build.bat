@@ -11,6 +11,7 @@ python -m nuitka ^
   --assume-yes-for-downloads ^
   --noinclude-unittest-mode=nofollow ^
   --noinclude-pytest-mode=nofollow ^
+  --nofollow-import-to=numpy ^
   --lto=yes ^
   --jobs=4 ^
   --windows-uac-admin ^
