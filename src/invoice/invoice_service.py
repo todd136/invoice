@@ -90,9 +90,10 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
             first_page_buyer_words = None
             first_page_seller_words = None
             first_page_table_words = None
-            first_page_all_words = None
             first_page_layout = None
             all_table_words = []
+            # 价税合计常在末页；逐页提取，保留最后一次非空结果
+            total_amount = ''
             
             # 存储所有页面的 raw_items（未合并的明细项）
             all_raw_items = []
@@ -112,6 +113,10 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                 # 过滤掉印章文字（红色）
                 clean_words = filter_seal_text(page, words)
 
+                page_total = extract_total_amount_from_words(clean_words)
+                if page_total:
+                    total_amount = page_total
+
                 # 2. 使用分割线进行发票分区（对每页都进行分区）
                 logging.debug(f'开始使用分割线对第 {page_idx + 1} 页进行发票分区...')
                 header_words, buyer_words, seller_words, table_words, page_layout = partition_invoice_by_lines(
@@ -124,7 +129,6 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                     first_page_buyer_words = buyer_words
                     first_page_seller_words = seller_words
                     first_page_table_words = table_words
-                    first_page_all_words = clean_words
                     first_page_layout = page_layout
                     # 只有在DEBUG日志级别时才打印各分区内容（调试用）
                     if logger.isEnabledFor(logging.DEBUG):
@@ -145,13 +149,13 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                         all_raw_items.extend(page_raw_items)
                         logging.debug(f'第 {page_idx + 1} 页提取到 {len(page_raw_items)} 条原始明细项')
 
-            # 3. 提取发票基本信息（只使用第一页的分区结果）
+            # 3. 提取发票基本信息（号码/购销方等取第一页；价税合计已按全页扫描）
             if first_page_header_words is not None and first_page_buyer_words is not None:
-                code, date, buyer, buyer_tax_id, invoice_type, seller, total_amount = extract_basic_info(
+                code, date, buyer, buyer_tax_id, invoice_type, seller, _ = extract_basic_info(
                     first_page_header_words,
                     first_page_buyer_words,
                     first_page_seller_words or [],
-                    first_page_all_words or [],
+                    [],
                 )
 
                 invoice.code = code
