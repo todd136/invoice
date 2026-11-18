@@ -687,11 +687,13 @@ def is_buyer_seller_fragment_text(text: str) -> bool:
     compact = text.replace(' ', '')
     if not compact:
         return False
-    if re.fullmatch(r'[信息购销买卖方]+', compact):
+    # 含「售」（与「销」不同字）
+    frag_chars = '信息购销销售买卖方'
+    if re.fullmatch(rf'[{re.escape(frag_chars)}]+', compact):
         return True
     if compact in ALWAYS_DROP_EXACT:
         return True
-    if len(compact) <= 4 and all(c in '购销买卖方信息' for c in compact):
+    if len(compact) <= 4 and all(c in frag_chars for c in compact):
         return True
     return False
 

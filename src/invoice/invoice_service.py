@@ -14,6 +14,7 @@ from .regex_utils import (
     PROJECT_NAME_REGEX, TAX_ID_PATTERNS, TAX_ID_GLOBAL_REGEX, LONG_NUMBER_REGEX,
     ROOM_NUMBER_REGEX, ROOM_ALPHA_REGEX, COMPANY_NAME_REGEX, normalize_alpha_num,
     has_project_name_at_start,
+    TOTAL_AMOUNT_REGEX, TOTAL_AMOUNT_REGEX_LOOSE, TOTAL_AMOUNT_REGEX_BEFORE,
 )
 from .text_utils import clean_garbled_chars, reconstruct_text_from_words, normalize_text_whitespace
 from .number_utils import (
@@ -87,7 +88,9 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
             # 存储第一页的分区结果（用于提取基本信息和列坐标）
             first_page_header_words = None
             first_page_buyer_words = None
+            first_page_seller_words = None
             first_page_table_words = None
+            first_page_all_words = None
             first_page_layout = None
             all_table_words = []
             
@@ -119,7 +122,9 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
                 if page_idx == 0:
                     first_page_header_words = header_words
                     first_page_buyer_words = buyer_words
+                    first_page_seller_words = seller_words
                     first_page_table_words = table_words
+                    first_page_all_words = clean_words
                     first_page_layout = page_layout
                     # 只有在DEBUG日志级别时才打印各分区内容（调试用）
                     if logger.isEnabledFor(logging.DEBUG):
@@ -142,15 +147,20 @@ def extract_invoice_by_table_and_text(pdf_file_path: str) -> Invoice:
 
             # 3. 提取发票基本信息（只使用第一页的分区结果）
             if first_page_header_words is not None and first_page_buyer_words is not None:
-                code, date, buyer, buyer_tax_id, invoice_type = extract_basic_info(
-                    first_page_header_words, first_page_buyer_words
+                code, date, buyer, buyer_tax_id, invoice_type, seller, total_amount = extract_basic_info(
+                    first_page_header_words,
+                    first_page_buyer_words,
+                    first_page_seller_words or [],
+                    first_page_all_words or [],
                 )
 
                 invoice.code = code
                 invoice.date = date
+                invoice.seller = seller
                 invoice.buyer = buyer
                 invoice.buyer_tax_id = buyer_tax_id
                 invoice.invoice_type = invoice_type
+                invoice.total_amount = total_amount
             else:
                 logger.warning(f'未能从第一页提取到分区数据，基本信息可能为空')
 
@@ -276,17 +286,21 @@ def filter_seal_text(page, words: List[dict]) -> List[dict]:
 
 def extract_basic_info(
     header_words: List[dict],
-    buyer_words: List[dict]
-) -> Tuple[str, str, str, str, str]:
+    buyer_words: List[dict],
+    seller_words: Optional[List[dict]] = None,
+    page_words: Optional[List[dict]] = None,
+) -> Tuple[str, str, str, str, str, str, str]:
     """
     从分区后的内容中提取发票基本信息
     
     Args:
         header_words: 发票头区域的单词列表
         buyer_words: 购买方区域的单词列表
+        seller_words: 销售方区域的单词列表
+        page_words: 整页单词（用于价税合计，须含底部未过滤内容）
         
     Returns:
-        (code, date, buyer, buyer_tax_id, invoice_type)
+        (code, date, buyer, buyer_tax_id, invoice_type, seller, total_amount)
     """
     # 1. 提取发票号码（从 header_words）
     code = extract_invoice_code_from_words(header_words)
@@ -303,7 +317,46 @@ def extract_basic_info(
     # 5. 提取发票类型（从 header_words）
     invoice_type = extract_invoice_type_from_words(header_words)
 
-    return code, date, buyer, buyer_tax_id, invoice_type
+    # 6. 提取销售方名称（复用购买方名称清洗逻辑）
+    seller = extract_buyer_name_from_words(seller_words or [])
+
+    # 7. 提取价税合计小写金额（从整页词，底部在分区时会被删掉）
+    total_amount = extract_total_amount_from_words(page_words or [])
+
+    return code, date, buyer, buyer_tax_id, invoice_type, seller, total_amount
+
+
+def extract_total_amount_from_words(page_words: List[dict]) -> str:
+    """从整页单词中提取价税合计（小写）金额"""
+    if not page_words:
+        return ''
+
+    page_text = reconstruct_text_from_words(page_words)
+    page_text = clean_garbled_chars(page_text)
+
+    # 1) 「小写」之后的金额（最可靠）
+    match = TOTAL_AMOUNT_REGEX.search(page_text)
+    if match:
+        return match.group(1).replace(',', '').strip()
+
+    # 2) 「价税合计」之后带 ¥ 的金额
+    match = TOTAL_AMOUNT_REGEX_LOOSE.search(page_text)
+    if match:
+        return match.group(1).replace(',', '').strip()
+
+    # 3) 金额在标签左侧/上一行：取「价税合计」前最近的一个 ¥ 金额（避免误取「合计」行）
+    idx = page_text.find('价税合计')
+    if idx > 0:
+        window = page_text[max(0, idx - 100):idx]
+        amounts = re.findall(r'[¥￥·]\s*(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})', window)
+        if amounts:
+            return amounts[-1].replace(',', '').strip()
+
+    match = TOTAL_AMOUNT_REGEX_BEFORE.search(page_text)
+    if match:
+        return match.group(1).replace(',', '').strip()
+
+    return ''
 
 
 def extract_invoice_code_from_words(header_words: List[dict]) -> str:
@@ -361,9 +414,12 @@ def extract_date_from_words(header_words: List[dict]) -> str:
 
 
 _BUYER_NAME_STOP_KEYWORDS = (
-    '统一社会信用代码', '纳税人识别号', '销售方', '购买方', '买方', '卖方', '信息',
+    '统一社会信用代码', '纳税人识别号', '销售方', '购买方', '买方', '卖方', '方信息',
     '名称：', '名称:',
 )
+
+# 购销方折行碎片字符（含「售」，勿与「销」混淆）
+_BUYER_SELLER_FRAG_CHARS = '购销销售买卖方信息'
 
 # 「公司」之后若仅为这些组织后缀，视为名称一部分（如 …有限责任公司工会）
 _BUYER_NAME_SUFFIX_AFTER_COMPANY = frozenset({
@@ -415,24 +471,37 @@ def _trim_buyer_name_at_company_boundary(name: str) -> str:
         noise_in_tail = any(kw in tail for kw in (
             '名称', '统一社会', '纳税人', '销售', '购买', '买方', '卖方', '公司',
         ))
+        # …公司售 :方信9111… / …公司方
+        if (not noise_in_tail) and (
+            tail[0] in _BUYER_SELLER_FRAG_CHARS + '：:'
+            or re.match(r'^[A-Za-z0-9]{10,}', tail.replace(' ', ''))
+        ):
+            noise_in_tail = True
         if noise_in_tail:
             return head.strip()
         return name
 
 
 def _strip_buyer_seller_fragments_from_name(name: str) -> str:
-    """去掉 PDF 折行产生的购销方标签碎片（如「买」「方」「信」「息」「买 :」）"""
+    """去掉 PDF 折行产生的购销方标签碎片（如「买」「售」「方」「信」「买 :」）"""
     buyer = normalize_text_whitespace(name).strip()
-    # 先去掉紧跟在名称后的标签+标点：…公司买 : / …公司方
+    # 去掉末尾粘连的税号
+    buyer = re.sub(r'[A-Za-z0-9]{15,22}\s*$', '', buyer).strip()
+    # 先去掉紧跟在名称后的标签+标点：…公司买 : / …公司售 / …公司方
+    frag_cls = re.escape(_BUYER_SELLER_FRAG_CHARS)
     buyer = re.sub(
-        r'([购销买卖方信息]{1,4})\s*[：:／/]*\s*$',
+        rf'([{frag_cls}]{{1,4}})\s*[：:／/]*\s*$',
         '',
         buyer,
     ).strip()
     parts = buyer.split()
     while parts:
         token = parts[-1].strip('：:／/')
-        if is_buyer_seller_fragment_text(token) or is_buyer_seller_fragment_text(parts[-1]):
+        if (
+            is_buyer_seller_fragment_text(token)
+            or is_buyer_seller_fragment_text(parts[-1])
+            or re.fullmatch(r'[A-Za-z0-9]{15,22}', token)
+        ):
             parts.pop()
             continue
         break
@@ -443,13 +512,13 @@ def _strip_buyer_seller_fragments_from_name(name: str) -> str:
             continue
         break
     buyer = ' '.join(parts)
-    # PDF 折行有时把「方」紧贴在公司名后：…有限公司方
+    # PDF 折行有时把「方」「售」紧贴在名称后：…有限公司方 / …事务所售
     while len(buyer) > 1:
         tail = buyer[-1]
         if tail in '：:／/':
             buyer = buyer[:-1].rstrip()
             continue
-        if tail in '购销买卖方信息' and is_buyer_seller_fragment_text(tail):
+        if tail in _BUYER_SELLER_FRAG_CHARS and is_buyer_seller_fragment_text(tail):
             buyer = buyer[:-1].rstrip()
         else:
             break

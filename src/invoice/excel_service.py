@@ -11,6 +11,14 @@ from openpyxl.worksheet.worksheet import Worksheet
 from .invoice import Invoice, LineItem
 
 
+# 表头顺序须与 batch_export_to_excel 写列一致
+EXCEL_HEADERS = [
+    '发票号码', '开票日期', '销售方', '购买方', '项目名称', '规格', '单位',
+    '数量', '单价', '金额', '税率', '税额', '价税合计', '发票文件名',
+    '录入时间', '购买方统一社会信用代码/纳税人识别号', '发票类型',
+]
+
+
 def create_new_excel(filename: str, sheet_name: str = '发票明细') -> Workbook:
     """
     创建新的 Excel 文件并写入表头
@@ -26,15 +34,7 @@ def create_new_excel(filename: str, sheet_name: str = '发票明细') -> Workboo
     ws = wb.active
     ws.title = sheet_name
 
-    # 定义表头
-    headers = [
-        '发票号码', '开票日期', '购买方', '项目名称', '规格', '单位',
-        '数量', '单价', '金额', '税率', '税额', '发票文件名',
-        '录入时间', '购买方统一社会信用代码/纳税人识别号', '发票类型'
-    ]
-
-    # 写入表头
-    for col_idx, header in enumerate(headers, start=1):
+    for col_idx, header in enumerate(EXCEL_HEADERS, start=1):
         ws.cell(row=1, column=col_idx, value=header)
 
     # 保存文件
@@ -103,37 +103,40 @@ def batch_export_to_excel(invoice_list: List[Invoice], filename: str) -> int:
 
     for invoice in filtered_invoice_list:
         for item in invoice.items:
-            # 写入数据到单元格
-            # A 列: 发票号码
+            # A 发票号码
             ws.cell(row=current_row, column=1, value=invoice.code)
-            # B 列: 开票日期
+            # B 开票日期
             ws.cell(row=current_row, column=2, value=invoice.date)
-            # C 列: 购买方
-            ws.cell(row=current_row, column=3, value=invoice.buyer)
-            # D 列: 项目名称
-            ws.cell(row=current_row, column=4, value=item.item_name)
-            # E 列: 规格
-            ws.cell(row=current_row, column=5, value=item.spec)
-            # F 列: 单位
-            ws.cell(row=current_row, column=6, value=item.unit)
-            # G 列: 数量
-            ws.cell(row=current_row, column=7, value=item.quantity)
-            # H 列: 单价
-            ws.cell(row=current_row, column=8, value=item.price)
-            # I 列: 金额
-            ws.cell(row=current_row, column=9, value=item.amount)
-            # J 列: 税率
-            ws.cell(row=current_row, column=10, value=item.tax_rate)
-            # K 列: 税额
-            ws.cell(row=current_row, column=11, value=item.tax_amount)
-            # L 列: 发票文件名
-            ws.cell(row=current_row, column=12, value=invoice.name)
-            # M 列: 录入时间
-            ws.cell(row=current_row, column=13, value=handle_time)
-            # N 列: 购买方统一社会信用代码/纳税人识别号
-            ws.cell(row=current_row, column=14, value=invoice.buyer_tax_id)
-            # O 列: 发票类型
-            ws.cell(row=current_row, column=15, value=invoice.invoice_type)
+            # C 销售方
+            ws.cell(row=current_row, column=3, value=invoice.seller)
+            # D 购买方
+            ws.cell(row=current_row, column=4, value=invoice.buyer)
+            # E 项目名称
+            ws.cell(row=current_row, column=5, value=item.item_name)
+            # F 规格
+            ws.cell(row=current_row, column=6, value=item.spec)
+            # G 单位
+            ws.cell(row=current_row, column=7, value=item.unit)
+            # H 数量
+            ws.cell(row=current_row, column=8, value=item.quantity)
+            # I 单价
+            ws.cell(row=current_row, column=9, value=item.price)
+            # J 金额
+            ws.cell(row=current_row, column=10, value=item.amount)
+            # K 税率
+            ws.cell(row=current_row, column=11, value=item.tax_rate)
+            # L 税额
+            ws.cell(row=current_row, column=12, value=item.tax_amount)
+            # M 价税合计
+            ws.cell(row=current_row, column=13, value=invoice.total_amount)
+            # N 发票文件名
+            ws.cell(row=current_row, column=14, value=invoice.name)
+            # O 录入时间
+            ws.cell(row=current_row, column=15, value=handle_time)
+            # P 购买方统一社会信用代码/纳税人识别号
+            ws.cell(row=current_row, column=16, value=invoice.buyer_tax_id)
+            # Q 发票类型
+            ws.cell(row=current_row, column=17, value=invoice.invoice_type)
 
             current_row += 1
 

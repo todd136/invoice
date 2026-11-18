@@ -25,9 +25,11 @@ class Invoice:
     name: str = ""  # 发票文件名
     code: str = ""  # 发票编码
     date: str = ""  # 日期
+    seller: str = ""  # 销售方
     buyer: str = ""  # 购买方
     buyer_tax_id: str = ""  # 购买方统一社会信用代码/纳税人识别号
     invoice_type: str = ""  # 发票类型（普通/增值税专用）
+    total_amount: str = ""  # 价税合计（小写金额）
     items: List[LineItem] = None  # 商品明细列表
 
     def __post_init__(self):

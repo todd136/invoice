@@ -13,6 +13,24 @@ INVOICE_CODE_REGEX_LOOSE = re.compile(r'(?s)发票(?:号码|编码)?[^0-9]*(\d{1
 DATE_REGEX = re.compile(r'开票日期[：:\s]*(\d{4}年\d{1,2}月\d{1,2}日)')
 DATE_REGEX_LOOSE = re.compile(r'\d{4}\s*年\s*\d{1,2}\s*[月⽉]\s*\d{1,2}\s*[日⽇]')
 
+_AMOUNT_NUM = r'(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})'
+
+# 价税合计小写金额（优先匹配「小写」后的 ¥/·/数字）
+TOTAL_AMOUNT_REGEX = re.compile(
+    r'价税合计.{0,160}?(?:（小写）|\(小写\)|小写).{0,20}?[¥￥·]?\s*'
+    + _AMOUNT_NUM,
+    re.DOTALL,
+)
+TOTAL_AMOUNT_REGEX_LOOSE = re.compile(
+    r'价税合计.{0,160}?[¥￥·]\s*' + _AMOUNT_NUM,
+    re.DOTALL,
+)
+# 部分版式金额在「价税合计」标签左侧/上一行：¥45900.00 … 价税合计（小写）
+TOTAL_AMOUNT_REGEX_BEFORE = re.compile(
+    r'[¥￥·]\s*' + _AMOUNT_NUM + r'.{0,80}?价税合计',
+    re.DOTALL,
+)
+
 # 项目名称模式：*项目名称*费用名称
 PROJECT_NAME_REGEX = re.compile(r'\*([^*]+)\*[^*]+')
 
